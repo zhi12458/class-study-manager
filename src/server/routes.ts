@@ -112,6 +112,38 @@ function loadUser(db: DatabaseSync) {
   };
 }
 
+function assertCurrentPassword(db: DatabaseSync, userId: number, password: unknown): void {
+  const row = db.prepare("select password_hash as passwordHash from users where id = ?").get(userId) as
+    | { passwordHash: string }
+    | undefined;
+  if (!row || !verifyPassword(String(password ?? ""), row.passwordHash)) {
+    throw new Error("当前密码不正确");
+  }
+}
+
+function assertPhoneAvailable(
+  db: DatabaseSync,
+  phone: string,
+  options: { personId?: number | null; userId?: number | null } = {}
+): void {
+  const person = db.prepare("select id from persons where phone = ?").get(phone) as { id: number } | undefined;
+  if (person && person.id !== options.personId) throw new Error("该手机号已被其他人员使用");
+  const contact = db.prepare("select id from users where contact_phone = ?").get(phone) as { id: number } | undefined;
+  if (contact && contact.id !== options.userId) throw new Error("该手机号已被其他账号使用");
+  const account = db.prepare("select id from users where username = ?").get(phone) as { id: number } | undefined;
+  if (account && account.id !== options.userId) throw new Error("该手机号已被其他登录账号使用");
+}
+
+function loadAccountProfile(db: DatabaseSync, userId: number) {
+  return db.prepare(
+    `select u.id, u.username, u.display_name as displayName, u.is_admin as isAdmin,
+            u.person_id as personId, p.name, p.dharma_name as dharmaName,
+            coalesce(p.phone, u.contact_phone) as phone
+       from users u left join persons p on p.id = u.person_id
+      where u.id = ?`
+  ).get(userId) as Record<string, unknown> | undefined;
+}
+
 function listClasses(db: DatabaseSync, userId: number, isAdmin: boolean, canCounsel: boolean) {
   const where = isAdmin ? "1 = 1" : "(? = 1 and c.counselor_user_id = ?) or (m.user_id = ? and c.archived = 0)";
   const params: SQLInputValue[] = isAdmin ? [] : [canCounsel ? 1 : 0, userId, userId];
@@ -162,6 +194,8 @@ function getLesson(db: DatabaseSync, classId: number, lessonId: number) {
 function createOrUpdatePerson(db: DatabaseSync, input: { name: string; dharmaName?: string | null; phone: string }) {
   const phone = normalizePhone(input.phone);
   const existing = db.prepare("select id from persons where phone = ?").get(phone) as { id: number } | undefined;
+  const adminContact = db.prepare("select id from users where contact_phone = ?").get(phone);
+  if (adminContact) throw new Error("该手机号已被其他账号使用");
   if (existing) {
     if (input.dharmaName === undefined) {
       db.prepare("update persons set name = ?, updated_at = current_timestamp where id = ?")
@@ -269,6 +303,47 @@ export function createApiRouter(db: DatabaseSync) {
     res.json({ user: req.user, classAccesses: listClassAccesses(db, req.user) });
   });
 
+  router.get("/auth/profile", requireAuth, (req: AuthedRequest, res) => {
+    const profile = loadAccountProfile(db, req.user!.id);
+    if (!profile) return void res.status(404).json({ error: "账号不存在" });
+    res.json({ profile });
+  });
+
+  router.patch("/auth/profile", requireAuth, (req: AuthedRequest, res) => {
+    const profile = loadAccountProfile(db, req.user!.id);
+    if (!profile) return void res.status(404).json({ error: "账号不存在" });
+    const name = String(req.body.displayName ?? req.body.name ?? profile.displayName ?? "").trim();
+    if (!name) return void res.status(400).json({ error: "姓名必填" });
+    const isAdmin = Boolean(profile.isAdmin);
+    const personId = profile.personId == null ? null : Number(profile.personId);
+    if (!isAdmin && !personId) return void res.status(400).json({ error: "账号尚未关联人员资料" });
+    const currentPhone = profile.phone == null ? null : String(profile.phone);
+    const rawPhone = String(req.body.phone ?? currentPhone ?? "").trim();
+    const phone = rawPhone ? normalizePhone(rawPhone) : null;
+    if (!isAdmin && !phone) return void res.status(400).json({ error: "手机号必填" });
+    const phoneChanged = phone !== currentPhone;
+    if (phoneChanged) {
+      assertCurrentPassword(db, req.user!.id, req.body.currentPassword);
+      if (phone) assertPhoneAvailable(db, phone, { personId, userId: req.user!.id });
+    }
+    const dharmaName = isAdmin ? null : String(req.body.dharmaName ?? profile.dharmaName ?? "").trim() || null;
+
+    db.exec("begin immediate");
+    try {
+      if (isAdmin) {
+        db.prepare("update users set display_name = ?, contact_phone = ?, updated_at = current_timestamp where id = ?")
+          .run(name, phone, req.user!.id);
+      } else {
+        db.prepare("update persons set name = ?, dharma_name = ?, phone = ?, updated_at = current_timestamp where id = ?")
+          .run(name, dharmaName, phone, personId);
+        db.prepare("update users set display_name = ?, username = ?, updated_at = current_timestamp where id = ?")
+          .run(name, phone, req.user!.id);
+      }
+      db.exec("commit");
+      res.json({ profile: loadAccountProfile(db, req.user!.id) });
+    } catch (error) { db.exec("rollback"); throw error; }
+  });
+
   router.post("/auth/logout", (req, res) => {
     deleteSession(db, req.cookies?.[COOKIE]); res.clearCookie(COOKIE); res.json({ ok: true });
   });
@@ -286,7 +361,8 @@ export function createApiRouter(db: DatabaseSync) {
 
   router.get("/admin/counselors", requireAdmin, (_req, res) => {
     const counselors = db.prepare(
-      `select u.id, u.person_id as personId, u.display_name as displayName, p.phone,
+      `select u.id, u.person_id as personId, u.display_name as displayName,
+              p.dharma_name as dharmaName, p.phone,
               u.can_counsel as active, u.active as accountActive,
               (select count(*) from classes c where c.counselor_user_id = u.id and c.archived = 0) as activeClassCount,
               (select count(*) from classes c where c.counselor_user_id = u.id and c.archived = 1) as archivedClassCount,
@@ -341,11 +417,39 @@ export function createApiRouter(db: DatabaseSync) {
 
   router.patch("/admin/counselors/:id", requireAdmin, (req, res) => {
     const id = numberParam(req.params.id, "辅导员账号 ID");
-    if (typeof req.body.active !== "boolean") return void res.status(400).json({ error: "请指定启用或停用状态" });
     const counselor = db.prepare(
-      "select id, is_admin as isAdmin from users where id = ? and counselor_role = 1"
-    ).get(id) as { id: number; isAdmin: number } | undefined;
+      `select u.id, u.is_admin as isAdmin, u.person_id as personId, u.display_name as displayName,
+              p.name, p.dharma_name as dharmaName, p.phone
+         from users u join persons p on p.id = u.person_id
+        where u.id = ? and u.counselor_role = 1`
+    ).get(id) as { id: number; isAdmin: number; personId: number; displayName: string; name: string; dharmaName: string | null; phone: string } | undefined;
     if (!counselor || counselor.isAdmin) return void res.status(404).json({ error: "辅导员账号不存在" });
+
+    const editsProfile = req.body.displayName !== undefined || req.body.name !== undefined ||
+      req.body.dharmaName !== undefined || req.body.phone !== undefined;
+    if (editsProfile) {
+      const name = String(req.body.displayName ?? req.body.name ?? counselor.name).trim();
+      if (!name) return void res.status(400).json({ error: "姓名必填" });
+      const dharmaName = req.body.dharmaName === undefined
+        ? counselor.dharmaName
+        : String(req.body.dharmaName ?? "").trim() || null;
+      const phone = req.body.phone === undefined ? counselor.phone : normalizePhone(String(req.body.phone));
+      if (phone !== counselor.phone) {
+        assertCurrentPassword(db, (req as AuthedRequest).user!.id, req.body.currentPassword);
+        assertPhoneAvailable(db, phone, { personId: counselor.personId, userId: counselor.id });
+      }
+      db.exec("begin immediate");
+      try {
+        db.prepare("update persons set name = ?, dharma_name = ?, phone = ?, updated_at = current_timestamp where id = ?")
+          .run(name, dharmaName, phone, counselor.personId);
+        db.prepare("update users set display_name = ?, username = ?, updated_at = current_timestamp where id = ?")
+          .run(name, phone, counselor.id);
+        db.exec("commit");
+        return void res.json({ ok: true, id, displayName: name, dharmaName, phone });
+      } catch (error) { db.exec("rollback"); throw error; }
+    }
+
+    if (typeof req.body.active !== "boolean") return void res.status(400).json({ error: "请指定启用或停用状态" });
 
     if (req.body.active) {
       db.prepare("update users set can_counsel = 1, active = 1, updated_at = current_timestamp where id = ?").run(id);
@@ -668,6 +772,10 @@ export function createApiRouter(db: DatabaseSync) {
         const current = db.prepare("select name, dharma_name as dharmaName, phone from persons where id = ?").get(row.personId) as Record<string, unknown>;
         const phone = req.body.phone === undefined ? String(current.phone) : normalizePhone(String(req.body.phone));
         if (phone !== row.phone && row.userId && !req.user!.isAdmin) throw new Error("该手机号已绑定登录账号，请联系管理员修改");
+        if (phone !== row.phone) {
+          if (row.userId) assertCurrentPassword(db, req.user!.id, req.body.currentPassword);
+          assertPhoneAvailable(db, phone, { personId: row.personId, userId: row.userId });
+        }
         const dharmaName = req.body.dharmaName === undefined
           ? (current.dharmaName == null ? null : String(current.dharmaName))
           : String(req.body.dharmaName || "").trim() || null;
@@ -1066,7 +1174,7 @@ export function createApiRouter(db: DatabaseSync) {
   router.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     const message = error instanceof Error ? error.message : "服务器错误";
     console.error(error);
-    const conflict = /unique|已存在|重复/i.test(message);
+    const conflict = /unique|已存在|已被|重复/i.test(message);
     res.status(conflict ? 409 : 400).json({ error: message });
   });
   return router;

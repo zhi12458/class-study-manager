@@ -34,6 +34,7 @@ function runMigrations(db: DatabaseSync): void {
   if (!applied.has(3)) migrationThree(db);
   if (!applied.has(4)) migrationFour(db);
   if (!applied.has(5)) migrationFive(db);
+  if (!applied.has(6)) migrationSix(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -303,6 +304,22 @@ function migrationFive(db: DatabaseSync): void {
       update.run(course.title, course.lessonType, sequence, `第${sequence}课`);
     });
     db.prepare("insert into schema_migrations (version) values (5)").run();
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function migrationSix(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    db.exec(`
+      alter table users add column contact_phone text;
+      create unique index users_contact_phone_unique
+        on users(contact_phone) where contact_phone is not null;
+      insert into schema_migrations (version) values (6);
+    `);
     db.exec("commit");
   } catch (error) {
     db.exec("rollback");

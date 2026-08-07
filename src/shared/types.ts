@@ -37,7 +37,9 @@ export interface AuthUser {
   id: number;
   personId: number | null;
   displayName: string;
+  dharmaName: string | null;
   phone: string | null;
+  username: string;
   isAdmin: boolean;
   canCounsel: boolean;
   mustChangePassword: boolean;

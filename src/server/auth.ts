@@ -46,7 +46,8 @@ export function loadSessionUser(db: DatabaseSync, token?: string): AuthUser | nu
   if (!token) return null;
   const row = db.prepare(
     `select u.id, u.person_id as personId, u.display_name as displayName,
-            p.phone, u.is_admin as isAdmin, u.can_counsel as canCounsel,
+            p.dharma_name as dharmaName, coalesce(p.phone, u.contact_phone) as phone,
+            u.username, u.is_admin as isAdmin, u.can_counsel as canCounsel,
             u.must_change_password as mustChangePassword
        from sessions_auth s
        join users u on u.id = s.user_id
@@ -58,7 +59,9 @@ export function loadSessionUser(db: DatabaseSync, token?: string): AuthUser | nu
     id: Number(row.id),
     personId: row.personId == null ? null : Number(row.personId),
     displayName: String(row.displayName),
+    dharmaName: row.dharmaName == null ? null : String(row.dharmaName),
     phone: row.phone == null ? null : String(row.phone),
+    username: String(row.username),
     isAdmin: Boolean(row.isAdmin),
     canCounsel: Boolean(row.canCounsel),
     mustChangePassword: Boolean(row.mustChangePassword)
