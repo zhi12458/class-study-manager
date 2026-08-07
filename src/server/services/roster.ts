@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import type { EnrollmentStatus } from "../../shared/types.js";
 
 const DAY_MS = 86_400_000;
 
@@ -45,11 +46,14 @@ export function freezeLessonRoster(db: DatabaseSync, lessonId: number): void {
          and ga.effective_from_sequence <= ?
          and (ga.effective_to_sequence is null or ga.effective_to_sequence > ?)
        join groups g on g.id = ga.group_id
+       join enrollment_status_history es on es.enrollment_id = e.id
+         and es.effective_from_sequence <= ?
+         and (es.effective_to_sequence is null or es.effective_to_sequence > ?)
       where e.class_id = ?
         and e.active_from_sequence <= ?
-        and (e.inactive_from_sequence is null or e.inactive_from_sequence > ?)
+        and es.status = 'normal'
       order by g.sort_order, p.name`
-  ).all(lesson.sequence, lesson.sequence, lesson.classId, lesson.sequence, lesson.sequence) as Array<{
+  ).all(lesson.sequence, lesson.sequence, lesson.sequence, lesson.sequence, lesson.classId, lesson.sequence) as Array<{
     enrollmentId: number; name: string; dharmaName: string | null; groupId: number; groupName: string;
   }>;
 
@@ -103,11 +107,52 @@ export function freezeStartedLessons(db: DatabaseSync, classId: number, today = 
 export function assertPersonAvailableForEnrollment(db: DatabaseSync, personId: number, targetClassId: number): void {
   const other = db.prepare(
     `select c.name
-       from enrollments e join classes c on c.id = e.class_id
-      where e.person_id = ? and e.inactive_from_sequence is null and c.archived = 0 and c.id != ?
+       from enrollments e
+       join classes c on c.id = e.class_id
+       join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+      where e.person_id = ? and es.status != 'withdrawn' and c.archived = 0 and c.id != ?
       limit 1`
   ).get(personId, targetClassId) as { name: string } | undefined;
   if (other) throw new Error(`该手机号已作为学员加入“${other.name}”`);
+}
+
+export function setEnrollmentStatusFromSequence(
+  db: DatabaseSync,
+  enrollmentId: number,
+  status: EnrollmentStatus,
+  effectiveSequence: number
+): void {
+  const current = db.prepare(
+    `select id, status, effective_from_sequence as effectiveFromSequence
+       from enrollment_status_history
+      where enrollment_id = ? and effective_to_sequence is null`
+  ).get(enrollmentId) as { id: number; status: EnrollmentStatus; effectiveFromSequence: number } | undefined;
+  if (!current) throw new Error("学员缺少有效的状态记录");
+  if (current.status === status) return;
+
+  if (current.effectiveFromSequence === effectiveSequence) {
+    const previous = db.prepare(
+      `select id, status from enrollment_status_history
+        where enrollment_id = ? and effective_to_sequence = ?
+        order by effective_from_sequence desc limit 1`
+    ).get(enrollmentId, effectiveSequence) as { id: number; status: EnrollmentStatus } | undefined;
+    if (previous?.status === status) {
+      db.prepare("delete from enrollment_status_history where id = ?").run(current.id);
+      db.prepare("update enrollment_status_history set effective_to_sequence = null where id = ?").run(previous.id);
+    } else {
+      db.prepare("update enrollment_status_history set status = ? where id = ?").run(status, current.id);
+    }
+  } else {
+    db.prepare("update enrollment_status_history set effective_to_sequence = ? where id = ?").run(effectiveSequence, current.id);
+    db.prepare(
+      "insert into enrollment_status_history (enrollment_id, status, effective_from_sequence) values (?, ?, ?)"
+    ).run(enrollmentId, status, effectiveSequence);
+  }
+  const enrollment = db.prepare("select active_from_sequence as activeFromSequence from enrollments where id = ?")
+    .get(enrollmentId) as { activeFromSequence: number };
+  const inactiveFrom = status === "withdrawn" && effectiveSequence > enrollment.activeFromSequence ? effectiveSequence : null;
+  db.prepare("update enrollments set inactive_from_sequence = ?, updated_at = current_timestamp where id = ?")
+    .run(inactiveFrom, enrollmentId);
 }
 
 export function setEnrollmentGroupFromSequence(

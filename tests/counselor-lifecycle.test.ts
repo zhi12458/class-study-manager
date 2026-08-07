@@ -133,8 +133,8 @@ describe("辅导员、班长和学员生命周期", () => {
       expect((await admin.json("DELETE", `/classes/${classId}/monitor`)).status).toBe(200);
       expect((await compositeClient.get<{ user: unknown }>("/auth/me")).body.user).toBeNull();
       expect((await admin.patch(`/classes/${classId}/students/${added.body.studentId}`, { active: false })).status).toBe(200);
-      const students = await admin.get<{ students: Array<{ studentId: number; active: boolean }> }>(`/classes/${classId}/students`);
-      expect(students.body.students.find((student) => student.studentId === added.body.studentId)).toBeUndefined();
+      const students = await admin.get<{ students: Array<{ studentId: number; status: string }> }>(`/classes/${classId}/students`);
+      expect(students.body.students.find((student) => student.studentId === added.body.studentId)?.status).toBe("withdrawn");
     });
   });
 });

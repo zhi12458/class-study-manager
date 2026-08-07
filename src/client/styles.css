@@ -58,6 +58,19 @@ input:focus, select:focus, textarea:focus { border-color: var(--sky-400); box-sh
 input::placeholder, textarea::placeholder { color: #a6b3c0; }
 label { display: grid; gap: 7px; color: #3f536b; font-size: 13px; font-weight: 700; }
 label small { color: var(--muted); font-weight: 500; line-height: 1.5; }
+fieldset { min-width: 0; margin: 0; }
+.identity-field { padding: 13px; border: 1px solid #d6e4ef; border-radius: 11px; }
+.identity-field legend { padding: 0 5px; color: #3f536b; font-size: 13px; font-weight: 700; }
+.identity-field > small { display: block; margin-top: 9px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.checkbox-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.checkbox-grid label { min-height: 38px; padding: 8px 10px; display: flex; align-items: center; gap: 7px; border: 1px solid #dce8f2; border-radius: 9px; background: #f8fbfd; }
+.checkbox-grid input { width: 16px; min-height: 16px; padding: 0; }
+.identity-badges { display: flex; flex-wrap: wrap; gap: 5px; }
+.identity-badges span { padding: 3px 7px; color: #50687e; background: #edf4f8; border-radius: 999px; font-size: 11px; font-weight: 700; }
+.student-status { padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 750; }
+.student-status.normal { color: #087952; background: #e6f7f0; }
+.student-status.leave { color: #a26108; background: #fff3dc; }
+.student-status.withdrawn { color: #687888; background: #edf1f4; }
 h1, h2, h3, p { margin: 0; }
 h1 { color: var(--navy); font-size: clamp(25px, 2.4vw, 34px); line-height: 1.2; letter-spacing: -.03em; }
 h2 { color: var(--navy); font-size: 18px; line-height: 1.35; }
@@ -160,6 +173,7 @@ p { color: var(--muted); line-height: 1.65; }
 
 .class-card-grid, .group-card-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 17px; }
 .class-card { overflow: hidden; background: #fff; border: 1px solid #d7e6f2; border-radius: 18px; box-shadow: var(--shadow); transition: transform .2s, box-shadow .2s; }
+.class-card.stopped { background: #f8fafc; border-color: #dce2e8; }
 .class-card:hover { transform: translateY(-3px); box-shadow: 0 18px 40px rgba(34,90,140,.13); }
 .class-card-illustration { height: 95px; padding: 18px; position: relative; overflow: hidden; display: flex; justify-content: space-between; align-items: flex-start; color: #fff; background:
   radial-gradient(ellipse at 82% 95%, rgba(255,255,255,.92) 0 28%, transparent 29%),
@@ -167,6 +181,16 @@ p { color: var(--muted); line-height: 1.65; }
   linear-gradient(135deg, #69c0fb, #2a95ed); }
 .class-card-illustration span { padding: 5px 8px; border-radius: 999px; background: rgba(14,88,149,.18); font-size: 11px; font-weight: 750; }
 .class-card-body { padding: 18px; display: grid; gap: 14px; }
+.class-status { padding: 5px 10px !important; color: #fff; background: rgba(14,88,149,.18) !important; }
+.class-status.normal { background: rgba(11,126,86,.78) !important; }
+.class-status.stopped { background: rgba(88,103,119,.8) !important; }
+.class-card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.class-card-actions > :only-child { grid-column: 1 / -1; }
+.class-filter-bar { display: flex; justify-content: flex-end; }
+.class-filter-bar > div { padding: 4px; display: flex; gap: 4px; background: #eaf2f8; border-radius: 11px; }
+.class-filter-bar button { min-height: 34px; padding: 0 12px; color: #5c7187; background: transparent; }
+.class-filter-bar button.active { color: #0874db; background: #fff; box-shadow: 0 3px 10px rgba(45,88,127,.1); }
+.class-filter-bar button span { min-width: 20px; padding: 2px 5px; border-radius: 999px; background: rgba(95,127,153,.1); font-size: 11px; }
 .card-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .class-card-body > p { font-size: 13px; }
 .soft-badge { padding: 5px 9px; color: #50677e; background: #edf3f7; }
@@ -380,6 +404,7 @@ td strong { color: #253b55; }
 }
 
 @media (max-width: 760px) {
+  .checkbox-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .login-page { min-height: 100svh; grid-template-columns: 1fr; gap: 28px; padding: 24px 16px; }
   .login-copy { padding: 25px 7px 0; }
   .login-copy h1 { font-size: 38px; }

@@ -6,6 +6,8 @@ export type OutlineStatus = "yes" | "no" | "not_required";
 export type GroupStudyStatus = "present" | "absent";
 export type ClassStudyStatus = "onsite" | "online" | "makeup" | "share" | "absent";
 export type ReportRange = "recent" | "month" | "three_months" | "history";
+export type EnrollmentStatus = "normal" | "leave" | "withdrawn";
+export type EnrollmentRole = "monitor" | "group_leader" | "charity" | "dharma_light" | "communications" | "student";
 
 export interface ClassAccess {
   classId: number;
@@ -49,6 +51,7 @@ export interface ClassSummary {
   studentCount?: number;
   cadenceMode?: CadenceMode;
   archived?: boolean;
+  deletable?: boolean;
   permission?: ClassPermission | "admin";
 }
 
@@ -70,6 +73,8 @@ export interface Student {
   groupId: number;
   groupName?: string;
   active?: boolean;
+  status?: EnrollmentStatus;
+  identities?: EnrollmentRole[];
   effectiveFromLessonId?: number | null;
 }
 
@@ -155,6 +160,8 @@ export interface ImportPreview {
     phone: string;
     groupName: string;
     note?: string | null;
+    status: EnrollmentStatus;
+    identities: EnrollmentRole[];
     action: "create" | "update" | "skip" | "conflict";
     message?: string;
   }>;

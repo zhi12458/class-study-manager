@@ -52,6 +52,8 @@ import {
   type ClassSummary,
   type Counselor,
   type CurrentUser,
+  type EnrollmentRole,
+  type EnrollmentStatus,
   type Group,
   type GroupStudyStatus,
   type ImportPreview,
@@ -90,6 +92,15 @@ const CLASS_OPTIONS: Array<{ value: ClassStudyStatus; label: string }> = [
   { value: "share", label: "分享" },
   { value: "absent", label: "缺勤" }
 ];
+const ENROLLMENT_STATUS_LABELS: Record<EnrollmentStatus, string> = { normal: "正常", leave: "休学", withdrawn: "退学" };
+const ENROLLMENT_ROLE_LABELS: Record<EnrollmentRole, string> = {
+  monitor: "班长", group_leader: "组长", charity: "慈善", dharma_light: "传灯",
+  communications: "文宣", student: "学员"
+};
+const EDITABLE_ROLE_OPTIONS: Array<{ value: EnrollmentRole; label: string }> = [
+  { value: "group_leader", label: "组长" }, { value: "charity", label: "慈善" },
+  { value: "dharma_light", label: "传灯" }, { value: "communications", label: "文宣" }
+];
 
 type NoticeState = { tone: "success" | "error" | "info"; text: string } | null;
 type NavContextValue = { path: string; go: (path: string) => boolean; dirty: boolean; setDirty: (dirty: boolean) => void };
@@ -120,6 +131,7 @@ function classFromRaw(raw: Record<string, unknown>): ClassSummary {
     studentCount: Number(raw.studentCount ?? 0),
     cadenceMode: (raw.cadenceMode ?? "same_week") as CadenceMode,
     archived: Boolean(raw.archived),
+    deletable: Boolean(raw.deletable),
     permission: (raw.permission ?? "admin") as ClassSummary["permission"]
   };
 }
@@ -145,6 +157,8 @@ function studentFromRaw(raw: Record<string, unknown>): Student {
     groupId: Number(raw.groupId ?? 0),
     groupName: String(raw.groupName ?? ""),
     active: raw.active == null ? true : Boolean(raw.active),
+    status: (raw.status ?? "normal") as EnrollmentStatus,
+    identities: Array.isArray(raw.identities) ? raw.identities.map(String) as EnrollmentRole[] : ["student"],
     effectiveFromLessonId: raw.effectiveFromLessonId == null ? null : Number(raw.effectiveFromLessonId)
   };
 }
@@ -442,7 +456,7 @@ function AppShell({ user, classes, currentClass, onSelectClass, onLogout, childr
             {classes.length > 0 ? (
               <div className="select-shell">
                 <select value={currentClass?.id ?? ""} onChange={(event) => onSelectClass(Number(event.target.value))} aria-label="切换班级">
-                  {classes.filter((item) => !item.archived || item.id === currentClass?.id).map((item) => <option key={item.id} value={item.id}>{item.name}{item.archived ? "（已归档）" : ""}</option>)}
+                  {classes.filter((item) => !item.archived || item.id === currentClass?.id).map((item) => <option key={item.id} value={item.id}>{item.name}{item.archived ? "（已停用）" : ""}</option>)}
                 </select>
                 <ChevronDown size={15} />
               </div>
@@ -484,6 +498,7 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
   const [cadenceMode, setCadenceMode] = useState<CadenceMode>("same_week");
   const [notice, setNotice] = useState<NoticeState>(null);
   const [counselorNotice, setCounselorNotice] = useState<NoticeState>(null);
+  const [classFilter, setClassFilter] = useState<"all" | "normal" | "stopped">("all");
   const [loading, setLoading] = useState(false);
 
   const loadCounselors = useCallback(async () => {
@@ -571,13 +586,35 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
     finally { setLoading(false); }
   }
 
+  async function setClassStopped(item: ClassSummary, stopped: boolean) {
+    const action = stopped ? "停用" : "恢复";
+    if (!window.confirm(`确定${action}班级“${item.name}”吗？${stopped ? "班长将立即停止访问，历史数据会保留。" : "班级将恢复日常使用。"}`)) return;
+    setLoading(true);
+    try {
+      await apiJson(`/api/classes/${item.id}`, { method: "PATCH", body: JSON.stringify({ archived: stopped }) });
+      await onRefresh();
+      setNotice({ tone: "success", text: `${item.name} 已${action}` });
+    } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
+    finally { setLoading(false); }
+  }
+
+  async function deleteClass(item: ClassSummary) {
+    if (!window.confirm(`确定永久删除空班级“${item.name}”吗？此操作不能撤销。`)) return;
+    setLoading(true);
+    try {
+      await apiJson(`/api/classes/${item.id}`, { method: "DELETE" });
+      await onRefresh();
+      setNotice({ tone: "success", text: `${item.name} 已永久删除` });
+    } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
+    finally { setLoading(false); }
+  }
+
   function enterClass(id: number) {
     onSelect(id);
     go("/overview");
   }
 
-  const activeClasses = classes.filter((item) => !item.archived);
-  const archivedClasses = classes.filter((item) => item.archived);
+  const visibleClasses = classes.filter((item) => classFilter === "all" || (classFilter === "normal" ? !item.archived : item.archived));
 
   return (
     <main className="page">
@@ -587,28 +624,29 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
         {(user.isAdmin || user.canCounsel) && <button className="primary" onClick={() => setShowCreate(true)}><Plus size={17} /> 新建班级</button>}
       </>} />
       <Notice notice={notice} onClose={() => setNotice(null)} />
-      {activeClasses.length === 0 ? (
+      <section className="class-filter-bar"><div><button className={classFilter === "all" ? "active" : ""} onClick={() => setClassFilter("all")}>全部 <span>{classes.length}</span></button><button className={classFilter === "normal" ? "active" : ""} onClick={() => setClassFilter("normal")}>正常 <span>{classes.filter((item) => !item.archived).length}</span></button><button className={classFilter === "stopped" ? "active" : ""} onClick={() => setClassFilter("stopped")}>已停用 <span>{classes.filter((item) => item.archived).length}</span></button></div></section>
+      {visibleClasses.length === 0 ? (
         <EmptyState
-          title="还没有班级"
-          detail={(user.isAdmin || user.canCounsel) ? "创建第一个班级后，就可以导入名单并生成课表。" : "您目前没有可访问的班级，请联系管理员或辅导员。"}
-          action={(user.isAdmin || user.canCounsel) ? <button className="primary" onClick={() => setShowCreate(true)}><Plus size={17} /> 创建班级</button> : undefined}
+          title={classes.length ? "当前筛选没有班级" : "还没有班级"}
+          detail={classes.length ? "请切换其他状态查看。" : (user.isAdmin || user.canCounsel) ? "创建第一个班级后，就可以导入名单并生成课表。" : "您目前没有可访问的班级，请联系管理员或辅导员。"}
+          action={!classes.length && (user.isAdmin || user.canCounsel) ? <button className="primary" onClick={() => setShowCreate(true)}><Plus size={17} /> 创建班级</button> : undefined}
         />
       ) : (
         <section className="class-card-grid">
-          {activeClasses.map((item) => (
-            <article className="class-card" key={item.id}>
-              <div className="class-card-illustration"><CloudSun size={30} /><span>{item.groupCount || 0} 个小组</span></div>
+          {visibleClasses.map((item) => (
+            <article className={`class-card ${item.archived ? "stopped" : ""}`} key={item.id}>
+              <div className="class-card-illustration"><CloudSun size={30} /><span className={`class-status ${item.archived ? "stopped" : "normal"}`}>{item.archived ? "已停用" : "正常"}</span></div>
               <div className="class-card-body">
                 <div className="card-title-row"><h2>{item.name}</h2><span className="soft-badge">{item.permission === "monitor" ? "班长" : item.permission === "counselor" ? "辅导员" : "管理员"}</span></div>
                 <p>辅导员：{item.counselorName || "待设置"}</p>
-                <div className="class-facts"><span><Users size={15} /> {item.studentCount ?? 0} 位学员</span><span><UserCog size={15} /> 班长：{item.monitorName || "未设置"}</span></div>
+                <div className="class-facts"><span><Users size={15} /> {item.studentCount ?? 0} 位在班学员</span><span><UserCog size={15} /> 班长：{item.monitorName || "未设置"}</span></div>
                 <button className="primary full" onClick={() => enterClass(item.id)}>进入班级 <span aria-hidden>→</span></button>
+                {(user.isAdmin || item.permission === "counselor") && <div className="class-card-actions"><button className="secondary" onClick={() => void setClassStopped(item, !item.archived)} disabled={loading}>{item.archived ? "恢复班级" : "停用班级"}</button>{user.isAdmin && item.deletable && <button className="ghost danger" onClick={() => void deleteClass(item)} disabled={loading}>永久删除</button>}</div>}
               </div>
             </article>
           ))}
         </section>
       )}
-      {archivedClasses.length > 0 && <section className="panel subtle-panel"><h2><Archive size={18} /> 已归档班级</h2><div className="archived-list">{archivedClasses.map((item) => <button key={item.id} onClick={() => enterClass(item.id)}><span>{item.name}</span><small>查看历史</small></button>)}</div></section>}
 
       {showCreate && <Modal title="创建新班级" subtitle="创建后会自动生成默认小组，课表可稍后安排。" onClose={() => setShowCreate(false)}>
         <form className="form-stack" onSubmit={createClass}>
@@ -786,6 +824,8 @@ function StudentEditor({ classId, student, groups, onClose, onSaved }: { classId
   const [phone, setPhone] = useState(student?.phone ?? "");
   const [groupId, setGroupId] = useState(String(student?.groupId ?? groups[0]?.id ?? ""));
   const [note, setNote] = useState(student?.note ?? "");
+  const [status, setStatus] = useState<EnrollmentStatus>(student?.status ?? "normal");
+  const [identities, setIdentities] = useState<EnrollmentRole[]>(student?.identities?.filter((role) => !["monitor", "student"].includes(role)) ?? []);
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(null);
 
@@ -794,7 +834,7 @@ function StudentEditor({ classId, student, groups, onClose, onSaved }: { classId
     try {
       await apiJson(`/api/classes/${classId}/students${student ? `/${student.id}` : ""}`, {
         method: student ? "PATCH" : "POST",
-        body: JSON.stringify({ name: name.trim(), dharmaName: dharmaName.trim() || null, phone: phone.trim(), groupId: Number(groupId), note: note.trim() || null })
+        body: JSON.stringify({ name: name.trim(), dharmaName: dharmaName.trim() || null, phone: phone.trim(), groupId: Number(groupId), note: note.trim() || null, status, identities })
       });
       await onSaved(); onClose();
     } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
@@ -806,6 +846,8 @@ function StudentEditor({ classId, student, groups, onClose, onSaved }: { classId
       <div className="form-grid two"><label>姓名<input value={name} onChange={(e) => setName(e.target.value)} required autoFocus /></label><label>法名（选填）<input value={dharmaName} onChange={(e) => setDharmaName(e.target.value)} /></label></div>
       <label>手机号<input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="tel" placeholder="未写区号时默认 +86" required /></label>
       <label>所在小组<select value={groupId} onChange={(e) => setGroupId(e.target.value)} required>{groups.filter((g) => g.active !== false).map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
+      <label>学员状态<select value={status} onChange={(e) => setStatus(e.target.value as EnrollmentStatus)}><option value="normal">正常（参与完成率统计）</option><option value="leave">休学（暂不统计）</option><option value="withdrawn">退学（不再统计）</option></select><small>状态从下一课起生效，已开始课次和历史完成率不会改变。</small></label>
+      <fieldset className="identity-field"><legend>班级身份（可多选）</legend><div className="checkbox-grid">{EDITABLE_ROLE_OPTIONS.map((option) => <label key={option.value}><input type="checkbox" checked={identities.includes(option.value)} onChange={(event) => setIdentities((current) => event.target.checked ? [...current, option.value] : current.filter((role) => role !== option.value))} /><span>{option.label}</span></label>)}</div><small>“学员”默认显示；“班长”与班级设置中的任命自动同步。每组只能设置一名组长。</small></fieldset>
       <label>备注（选填）<textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} placeholder="仅管理员和辅导员可见" /></label>
       <Notice notice={notice} />
       <div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>取消</button><button className="primary" disabled={loading}>{loading ? "保存中..." : "保存"}</button></div>
@@ -830,6 +872,8 @@ function ImportStudents({ classId, onClose, onCommitted }: { classId: number; on
         rowNumber: Number(item.rowNumber ?? item.sourceRow ?? index + 2), name: String(item.name ?? ""),
         dharmaName: item.dharmaName == null ? null : String(item.dharmaName), phone: String(item.phone ?? ""),
         groupName: String(item.groupName ?? item.group ?? ""), note: item.note == null ? null : String(item.note),
+        status: (item.status ?? "normal") as EnrollmentStatus,
+        identities: Array.isArray(item.identities) ? item.identities.map(String) as EnrollmentRole[] : [],
         action: (item.action ?? "create") as ImportPreview["rows"][number]["action"], message: item.message == null ? undefined : String(item.message)
       }));
       setPreview({ token: source.token == null ? undefined : String(source.token), rows, summary: source.summary as ImportPreview["summary"] });
@@ -848,10 +892,10 @@ function ImportStudents({ classId, onClose, onCommitted }: { classId: number; on
   }
 
   const conflicts = preview?.rows.filter((row) => row.action === "conflict").length ?? 0;
-  return <Modal title="从 Excel 导入学员" subtitle="模板列：姓名、法名、电话、小组、备注。提交前可先核对变化。" onClose={onClose} wide>
+  return <Modal title="从 Excel 导入学员" subtitle="模板列：姓名、法名、电话、小组、状态、身份、备注。提交前可先核对变化。" onClose={onClose} wide>
     <div className="form-stack">
       {!preview ? <>
-        <div className="template-download"><div><strong>还没有模板？</strong><span>下载标准 Excel 表头：姓名、法名、电话、小组、备注。</span></div><a className="secondary button" href={`/api/classes/${classId}/import/template.xlsx`} download><Download size={16} /> 下载模板</a></div>
+        <div className="template-download"><div><strong>还没有模板？</strong><span>模板包含状态和可多选身份；班长仍需在班级设置中任命。</span></div><a className="secondary button" href={`/api/classes/${classId}/import/template.xlsx`} download><Download size={16} /> 下载模板</a></div>
         <label className="upload-zone">
           <input type="file" accept=".xlsx,.xls" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
           <FileSpreadsheet size={34} />
@@ -862,7 +906,7 @@ function ImportStudents({ classId, onClose, onCommitted }: { classId: number; on
         <div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>取消</button><button type="button" className="primary" onClick={() => void previewFile()} disabled={!file || loading}>{loading ? "解析中..." : "预览导入"}</button></div>
       </> : <>
         <div className="import-summary"><span className="create">新增 {preview.rows.filter((r) => r.action === "create").length}</span><span className="update">更新 {preview.rows.filter((r) => r.action === "update").length}</span><span>重复 / 不变 {preview.rows.filter((r) => r.action === "skip").length}</span><span className="conflict">冲突 {conflicts}</span></div>
-        <div className="table-wrap compact-table"><table><thead><tr><th>行</th><th>姓名</th><th>法名</th><th>电话</th><th>小组</th><th>处理</th></tr></thead><tbody>{preview.rows.map((row) => <tr key={row.rowNumber} className={row.action === "conflict" ? "row-error" : ""}><td>{row.rowNumber}</td><td>{row.name}</td><td>{row.dharmaName || "—"}</td><td>{row.phone}</td><td>{row.groupName}</td><td><span className={`action-badge ${row.action}`}>{row.action === "create" ? "新增" : row.action === "update" ? "更新" : row.action === "skip" ? "跳过" : "冲突"}</span>{row.message && <small className="cell-note">{row.message}</small>}</td></tr>)}</tbody></table></div>
+        <div className="table-wrap compact-table"><table><thead><tr><th>行</th><th>姓名</th><th>电话</th><th>小组</th><th>状态</th><th>身份</th><th>处理</th></tr></thead><tbody>{preview.rows.map((row) => <tr key={row.rowNumber} className={row.action === "conflict" ? "row-error" : ""}><td>{row.rowNumber}</td><td>{row.name}</td><td>{row.phone}</td><td>{row.groupName}</td><td>{ENROLLMENT_STATUS_LABELS[row.status]}</td><td>{row.identities.length ? row.identities.map((role) => ENROLLMENT_ROLE_LABELS[role]).join("、") : "学员"}</td><td><span className={`action-badge ${row.action}`}>{row.action === "create" ? "新增" : row.action === "update" ? "更新" : row.action === "skip" ? "跳过" : "冲突"}</span>{row.message && <small className="cell-note">{row.message}</small>}</td></tr>)}</tbody></table></div>
         <Notice notice={notice} />
         <div className="modal-actions split"><button type="button" className="ghost" onClick={() => setPreview(null)}>重新选择</button><span>{conflicts ? "请先修正文件中的冲突项" : "确认后将一次性写入名单"}</span><button type="button" className="primary" onClick={() => void commit()} disabled={conflicts > 0 || loading}>{loading ? "导入中..." : "确认导入"}</button></div>
       </>}
@@ -877,6 +921,7 @@ function StudentsPage({ currentClass }: { currentClass: ClassSummary }) {
   const [notice, setNotice] = useState<NoticeState>(null);
   const [search, setSearch] = useState("");
   const [groupFilter, setGroupFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | EnrollmentStatus>("all");
   const [editing, setEditing] = useState<Student | "new" | null>(null);
   const [importing, setImporting] = useState(false);
 
@@ -896,26 +941,19 @@ function StudentsPage({ currentClass }: { currentClass: ClassSummary }) {
 
   const filtered = students.filter((student) => {
     if (groupFilter !== "all" && String(student.groupId) !== groupFilter) return false;
+    if (statusFilter !== "all" && student.status !== statusFilter) return false;
     const keyword = search.trim().toLowerCase();
     return !keyword || [student.name, student.dharmaName, student.phone].some((value) => value?.toLowerCase().includes(keyword));
   });
 
-  async function deactivate(student: Student) {
-    if (!window.confirm(`确定将“${student.name}”移出班级吗？该变化从下一课生效，历史考勤仍会保留。`)) return;
-    try {
-      await apiJson(`/api/classes/${currentClass.id}/students/${student.id}`, { method: "PATCH", body: JSON.stringify({ active: false }) });
-      setNotice({ tone: "success", text: `${student.name} 已移出班级，将从下一课生效` }); await load();
-    } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
-  }
-
   return <main className="page">
-    <PageHeader eyebrow="ROSTER" title="学员名单" description="管理姓名、法名、电话、小组和内部备注。名单变化从下一课生效。" actions={<><button className="secondary" onClick={() => setImporting(true)}><Upload size={17} /> Excel 导入</button><button className="primary" onClick={() => setEditing("new")}><UserPlus size={17} /> 新增学员</button></>} />
+    <PageHeader eyebrow="ROSTER" title="学员名单" description="管理资料、状态和班级身份；只有正常状态参与完成率统计。" actions={<><button className="secondary" onClick={() => setImporting(true)}><Upload size={17} /> Excel 导入</button><button className="primary" onClick={() => setEditing("new")}><UserPlus size={17} /> 新增学员</button></>} />
     <Notice notice={notice} onClose={() => setNotice(null)} />
     <section className="panel">
-      <div className="filter-bar"><label className="search-field"><span>搜索学员</span><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="姓名、法名或电话" /></label><label><span>小组</span><select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}><option value="all">全部小组</option>{groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label><div className="filter-count">共 <strong>{filtered.length}</strong> 人</div></div>
+      <div className="filter-bar"><label className="search-field"><span>搜索学员</span><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="姓名、法名或电话" /></label><label><span>小组</span><select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}><option value="all">全部小组</option>{groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label><label><span>状态</span><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as "all" | EnrollmentStatus)}><option value="all">全部状态</option><option value="normal">正常</option><option value="leave">休学</option><option value="withdrawn">退学</option></select></label><div className="filter-count">共 <strong>{filtered.length}</strong> 人</div></div>
       {loading ? <Loading /> : filtered.length === 0 ? <EmptyState title="没有匹配的学员" detail="尝试调整筛选，或新增一位学员。" /> : <>
-        <div className="table-wrap desktop-table"><table><thead><tr><th>学员</th><th>手机号</th><th>小组</th><th>备注</th><th>状态</th><th aria-label="操作" /></tr></thead><tbody>{filtered.map((student) => <tr key={student.id}><td><div className="person-cell"><div className="mini-avatar">{student.name.slice(0, 1)}</div><span><strong>{student.name}</strong><small>{student.dharmaName || "未填写法名"}</small></span></div></td><td>{student.phone || "—"}</td><td><span className="soft-badge">{student.groupName || groups.find((g) => g.id === student.groupId)?.name || "待分组"}</span></td><td className="note-cell">{student.note || "—"}</td><td><span className={`state-dot ${student.active === false ? "inactive" : ""}`}>{student.active === false ? "已移出" : "在册"}</span></td><td><div className="row-actions"><button className="icon-button" title="编辑" onClick={() => setEditing(student)}><Pencil size={16} /></button>{student.active !== false && <button className="text-danger" onClick={() => void deactivate(student)}>移出班级</button>}</div></td></tr>)}</tbody></table></div>
-        <div className="mobile-card-list">{filtered.map((student) => <article className="student-card" key={student.id}><div className="person-cell"><div className="mini-avatar large">{student.name.slice(0, 1)}</div><span><strong>{student.name}</strong><small>{student.dharmaName || "未填写法名"}</small></span><span className={`state-dot ${student.active === false ? "inactive" : ""}`}>{student.active === false ? "已移出" : "在册"}</span></div><dl><div><dt>小组</dt><dd>{student.groupName || groups.find((g) => g.id === student.groupId)?.name || "待分组"}</dd></div><div><dt>电话</dt><dd>{student.phone || "—"}</dd></div><div><dt>备注</dt><dd>{student.note || "—"}</dd></div></dl><div className="card-actions"><button className="secondary" onClick={() => setEditing(student)}><Pencil size={15} /> 编辑</button>{student.active !== false && <button className="ghost danger" onClick={() => void deactivate(student)}>移出班级</button>}</div></article>)}</div>
+        <div className="table-wrap desktop-table"><table><thead><tr><th>学员</th><th>手机号</th><th>小组</th><th>身份</th><th>备注</th><th>状态</th><th aria-label="操作" /></tr></thead><tbody>{filtered.map((student) => <tr key={student.id}><td><div className="person-cell"><div className="mini-avatar">{student.name.slice(0, 1)}</div><span><strong>{student.name}</strong><small>{student.dharmaName || "未填写法名"}</small></span></div></td><td>{student.phone || "—"}</td><td><span className="soft-badge">{student.groupName || groups.find((g) => g.id === student.groupId)?.name || "待分组"}</span></td><td><div className="identity-badges">{student.identities?.map((role) => <span key={role}>{ENROLLMENT_ROLE_LABELS[role]}</span>)}</div></td><td className="note-cell">{student.note || "—"}</td><td><span className={`student-status ${student.status ?? "normal"}`}>{ENROLLMENT_STATUS_LABELS[student.status ?? "normal"]}</span></td><td><button className="icon-button" title="编辑" onClick={() => setEditing(student)}><Pencil size={16} /></button></td></tr>)}</tbody></table></div>
+        <div className="mobile-card-list">{filtered.map((student) => <article className="student-card" key={student.id}><div className="person-cell"><div className="mini-avatar large">{student.name.slice(0, 1)}</div><span><strong>{student.name}</strong><small>{student.dharmaName || "未填写法名"}</small></span><span className={`student-status ${student.status ?? "normal"}`}>{ENROLLMENT_STATUS_LABELS[student.status ?? "normal"]}</span></div><div className="identity-badges">{student.identities?.map((role) => <span key={role}>{ENROLLMENT_ROLE_LABELS[role]}</span>)}</div><dl><div><dt>小组</dt><dd>{student.groupName || groups.find((g) => g.id === student.groupId)?.name || "待分组"}</dd></div><div><dt>电话</dt><dd>{student.phone || "—"}</dd></div><div><dt>备注</dt><dd>{student.note || "—"}</dd></div></dl><div className="card-actions"><button className="secondary" onClick={() => setEditing(student)}><Pencil size={15} /> 编辑状态与资料</button></div></article>)}</div>
       </>}
     </section>
     {editing && <StudentEditor classId={currentClass.id} student={editing === "new" ? null : editing} groups={groups} onClose={() => setEditing(null)} onSaved={load} />}
@@ -961,7 +999,7 @@ function GroupsPage({ currentClass, onClassRefresh }: { currentClass: ClassSumma
     if (desiredCount === activeGroups.length) return;
     if (desiredCount < activeGroups.length) {
       const removed = activeGroups.slice(desiredCount);
-      const occupied = removed.filter((group) => students.some((s) => s.active !== false && s.groupId === group.id));
+      const occupied = removed.filter((group) => students.some((s) => s.status !== "withdrawn" && s.groupId === group.id));
       if (occupied.length) {
         setNotice({ tone: "error", text: `请先把 ${occupied.map((g) => g.name).join("、")} 的学员转入保留小组，再减少组数` });
         return;
@@ -983,7 +1021,7 @@ function GroupsPage({ currentClass, onClassRefresh }: { currentClass: ClassSumma
       <div className="inline-control"><select value={desiredCount} onChange={(e) => setDesiredCount(Number(e.target.value))}>{[1, 2, 3, 4, 5].map((count) => <option key={count} value={count}>{count} 个小组</option>)}</select><button className="primary" onClick={() => void changeCount()} disabled={loading || desiredCount === groups.filter((g) => g.active !== false).length}>应用</button></div>
     </section>
     {loading ? <Loading /> : <section className="group-card-grid">{groups.filter((group) => group.active !== false).map((group, index) => {
-      const members = students.filter((student) => student.active !== false && student.groupId === group.id);
+      const members = students.filter((student) => student.status !== "withdrawn" && student.groupId === group.id);
       return <article className="group-card" key={group.id}>
         <div className={`group-number color-${index % 5}`}>{index + 1}</div>
         <div className="group-title-edit">
@@ -1158,12 +1196,15 @@ function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; cu
     finally { setLoading(false); }
   }
 
-  async function archiveClass() {
-    if (!window.confirm(`确定归档“${currentClass.name}”吗？班长将停止访问，历史数据仍会保留。`)) return;
+  async function toggleClassStatus() {
+    const restoring = Boolean(currentClass.archived);
+    if (!window.confirm(restoring ? `确定恢复“${currentClass.name}”吗？` : `确定停用“${currentClass.name}”吗？班长将停止访问，历史数据仍会保留。`)) return;
     setLoading(true);
     try {
-      await apiJson(`/api/classes/${currentClass.id}`, { method: "PATCH", body: JSON.stringify({ archived: true }) });
-      await onRefresh(); go("/classes");
+      await apiJson(`/api/classes/${currentClass.id}`, { method: "PATCH", body: JSON.stringify({ archived: !restoring }) });
+      await onRefresh();
+      if (!restoring) go("/classes");
+      else setNotice({ tone: "success", text: "班级已恢复正常使用" });
     } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
     finally { setLoading(false); }
   }
@@ -1186,7 +1227,7 @@ function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; cu
         <div className="permission-note"><strong>班长可以做什么？</strong><span>登记本班三项考勤，查看本班统计；不能查看手机号和备注，也不能维护名单或课表。</span></div>
       </section>
     </div>
-    <section className="panel danger-zone"><div><h2>归档班级</h2><p>归档不会删除历史记录；管理员和辅导员仍可查看，班长停止日常访问。</p></div><button className="ghost danger" onClick={() => void archiveClass()} disabled={loading}><Archive size={17} /> 归档这个班级</button></section>
+    <section className={`panel danger-zone ${currentClass.archived ? "restore-zone" : ""}`}><div><h2>{currentClass.archived ? "恢复班级" : "停用班级"}</h2><p>{currentClass.archived ? "恢复后可继续维护名册、课表和考勤。" : "停用不会删除历史记录；管理员和辅导员仍可查看，班长立即停止访问。"}</p></div><button className={currentClass.archived ? "secondary" : "ghost danger"} onClick={() => void toggleClassStatus()} disabled={loading}><Archive size={17} /> {currentClass.archived ? "恢复正常使用" : "停用这个班级"}</button></section>
   </main>;
 }
 

@@ -6,8 +6,8 @@ import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import { z } from "zod";
 import {
   CADENCE_MODES, CLASS_STUDY_STATUSES, GROUP_STUDY_STATUSES, LESSON_TYPES,
-  OUTLINE_STATUSES, REPORT_RANGES, type AttendanceStatus, type CadenceMode,
-  type Metric, type ReportRange
+  OUTLINE_STATUSES, REPORT_RANGES, ENROLLMENT_STATUSES, type AttendanceStatus, type CadenceMode,
+  type EnrollmentRole, type EnrollmentStatus, type Metric, type ReportRange
 } from "../shared/types.js";
 import { normalizePhone } from "../shared/phone.js";
 import { type AuthedRequest, requireAdmin, requireAuth, requireClassAccess } from "./access.js";
@@ -20,12 +20,13 @@ import { classifyRosterRows, parseRosterWorkbook, type ImportRow } from "./servi
 import { buildClassReport } from "./services/reportBuilder.js";
 import {
   assertPersonAvailableForEnrollment, freezeLessonRoster, getNextEffectiveSequence,
-  freezeStartedLessons, lessonStartDate, setEnrollmentGroupFromSequence, shanghaiToday
+  freezeStartedLessons, lessonStartDate, setEnrollmentGroupFromSequence, setEnrollmentStatusFromSequence, shanghaiToday
 } from "./services/roster.js";
 import { isMonitorLocked } from "./services/schedule.js";
 
 const COOKIE = "class_study_session";
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+const EDITABLE_ENROLLMENT_ROLES = ["group_leader", "charity", "dharma_light", "communications"] as const;
 
 function numberParam(value: unknown, label = "ID"): number {
   const parsed = Number(value);
@@ -119,7 +120,11 @@ function listClasses(db: DatabaseSync, userId: number, isAdmin: boolean, canCoun
             c.counselor_user_id as counselorId, cu.display_name as counselorName,
             m.enrollment_id as monitorId, mp.name as monitorName,
             (select count(*) from groups g where g.class_id = c.id and g.active = 1) as groupCount,
-            (select count(*) from enrollments e where e.class_id = c.id and e.inactive_from_sequence is null) as studentCount,
+            (select count(*) from enrollments e join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null where e.class_id = c.id and es.status != 'withdrawn') as studentCount,
+            case when not exists (select 1 from enrollments e where e.class_id = c.id)
+                       and not exists (select 1 from lessons l where l.class_id = c.id)
+                       and not exists (select 1 from schedule_breaks b where b.class_id = c.id)
+                 then 1 else 0 end as deletable,
             case when ? = 1 and c.counselor_user_id = ? then 'counselor' when m.user_id = ? then 'monitor' else 'admin' end as permission
        from classes c
        join users cu on cu.id = c.counselor_user_id
@@ -176,6 +181,7 @@ function createOrUpdatePerson(db: DatabaseSync, input: { name: string; dharmaNam
 
 function insertEnrollment(db: DatabaseSync, input: {
   classId: number; personId: number; groupId: number; note?: string | null; effectiveSequence: number;
+  status?: EnrollmentStatus; roles?: EnrollmentRole[];
 }): number {
   assertPersonAvailableForEnrollment(db, input.personId, input.classId);
   const same = db.prepare("select id from enrollments where class_id = ? and person_id = ?").get(input.classId, input.personId);
@@ -186,7 +192,52 @@ function insertEnrollment(db: DatabaseSync, input: {
   const enrollmentId = Number(result.lastInsertRowid);
   db.prepare("insert into group_assignments (enrollment_id, group_id, effective_from_sequence) values (?, ?, ?)")
     .run(enrollmentId, input.groupId, input.effectiveSequence);
+  if (input.status && input.status !== "normal") {
+    setEnrollmentStatusFromSequence(db, enrollmentId, input.status, input.effectiveSequence);
+  }
+  updateEnrollmentRoles(db, enrollmentId, input.classId, input.groupId, input.roles ?? []);
   return enrollmentId;
+}
+
+function parseEnrollmentStatus(value: unknown, fallback: EnrollmentStatus = "normal"): EnrollmentStatus {
+  const status = value == null || value === "" ? fallback : String(value) as EnrollmentStatus;
+  if (!ENROLLMENT_STATUSES.includes(status)) throw new Error("学员状态无效");
+  return status;
+}
+
+function parseEnrollmentRoles(value: unknown): EnrollmentRole[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error("学员身份必须是列表");
+  const roles = [...new Set(value.map(String))];
+  if (roles.some((role) => !(EDITABLE_ENROLLMENT_ROLES as readonly string[]).includes(role))) {
+    throw new Error("学员身份无效");
+  }
+  return roles as EnrollmentRole[];
+}
+
+function updateEnrollmentRoles(
+  db: DatabaseSync,
+  enrollmentId: number,
+  classId: number,
+  groupId: number,
+  roles: EnrollmentRole[]
+): void {
+  if (roles.includes("group_leader")) {
+    const occupied = db.prepare(
+      `select p.name
+         from enrollment_roles er
+         join enrollments e on e.id = er.enrollment_id
+         join persons p on p.id = e.person_id
+         join group_assignments ga on ga.enrollment_id = e.id and ga.effective_to_sequence is null
+         join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+        where e.class_id = ? and ga.group_id = ? and er.role = 'group_leader'
+          and es.status != 'withdrawn' and e.id != ? limit 1`
+    ).get(classId, groupId, enrollmentId) as { name: string } | undefined;
+    if (occupied) throw new Error(`该小组已有组长“${occupied.name}”`);
+  }
+  db.prepare("delete from enrollment_roles where enrollment_id = ?").run(enrollmentId);
+  const insert = db.prepare("insert into enrollment_roles (enrollment_id, role) values (?, ?)");
+  roles.forEach((role) => insert.run(enrollmentId, role));
 }
 
 export function createApiRouter(db: DatabaseSync) {
@@ -418,9 +469,11 @@ export function createApiRouter(db: DatabaseSync) {
           `select p.name, other.name as otherClassName
              from enrollments e
              join persons p on p.id = e.person_id
-             join enrollments oe on oe.person_id = e.person_id and oe.class_id != e.class_id and oe.inactive_from_sequence is null
+             join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null and es.status != 'withdrawn'
+             join enrollments oe on oe.person_id = e.person_id and oe.class_id != e.class_id
+             join enrollment_status_history oes on oes.enrollment_id = oe.id and oes.effective_to_sequence is null and oes.status != 'withdrawn'
              join classes other on other.id = oe.class_id and other.archived = 0
-            where e.class_id = ? and e.inactive_from_sequence is null limit 1`
+            where e.class_id = ? limit 1`
         ).get(classId) as { name: string; otherClassName: string } | undefined;
         if (conflict) throw new Error(`无法恢复班级：学员“${conflict.name}”已在“${conflict.otherClassName}”就读`);
       }
@@ -434,7 +487,11 @@ export function createApiRouter(db: DatabaseSync) {
       if (modeChanged) updateFutureCadence(db, classId, mode, { manageTransaction: false, freezeStarted: false });
       if (req.body.archived !== undefined) {
         db.prepare("update classes set archived = ?, updated_at = current_timestamp where id = ?").run(req.body.archived ? 1 : 0, classId);
-        if (req.body.archived === true) db.prepare("delete from class_monitors where class_id = ?").run(classId);
+        if (req.body.archived === true) {
+          const monitor = db.prepare("select user_id as userId from class_monitors where class_id = ?").get(classId) as { userId: number } | undefined;
+          db.prepare("delete from class_monitors where class_id = ?").run(classId);
+          if (monitor) deactivateRolelessUser(db, monitor.userId);
+        }
       }
       if (desired !== undefined) {
         const active = db.prepare("select id, name, sort_order as sortOrder from groups where class_id = ? and active = 1 order by sort_order")
@@ -453,8 +510,10 @@ export function createApiRouter(db: DatabaseSync) {
           const removing = active.slice(desired);
           for (const group of removing) {
             const assigned = db.prepare(
-              `select 1 from group_assignments ga join enrollments e on e.id = ga.enrollment_id
-                where ga.group_id = ? and ga.effective_to_sequence is null and e.inactive_from_sequence is null limit 1`
+              `select 1 from group_assignments ga
+                join enrollments e on e.id = ga.enrollment_id
+                join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+                where ga.group_id = ? and ga.effective_to_sequence is null and es.status != 'withdrawn' limit 1`
             ).get(group.id);
             if (assigned) throw new Error(`请先把“${group.name}”的学员转入其他小组`);
           }
@@ -470,12 +529,28 @@ export function createApiRouter(db: DatabaseSync) {
     res.json({ ok: true });
   });
 
+  router.delete("/classes/:classId", requireAdmin, (req, res) => {
+    const classId = numberParam(req.params.classId);
+    if (!db.prepare("select 1 from classes where id = ?").get(classId)) return void res.status(404).json({ error: "班级不存在" });
+    const used = db.prepare(
+      `select
+        (select count(*) from enrollments where class_id = ?) +
+        (select count(*) from lessons where class_id = ?) +
+        (select count(*) from schedule_breaks where class_id = ?) as count`
+    ).get(classId, classId, classId) as { count: number };
+    if (used.count > 0) return void res.status(409).json({ error: "该班级已有学员、课表或历史数据，只能停用，不能永久删除" });
+    db.prepare("delete from classes where id = ?").run(classId);
+    res.json({ ok: true });
+  });
+
   router.get("/classes/:classId/groups", requireAuth, requireClassAccess(db), (req, res) => {
     const classId = numberParam(req.params.classId);
     const groups = db.prepare(
       `select g.id, g.name, g.sort_order as sortOrder, g.active,
-        (select count(*) from group_assignments ga join enrollments e on e.id = ga.enrollment_id
-          where ga.group_id = g.id and ga.effective_to_sequence is null and e.inactive_from_sequence is null) as studentCount
+        (select count(*) from group_assignments ga
+          join enrollments e on e.id = ga.enrollment_id
+          join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+          where ga.group_id = g.id and ga.effective_to_sequence is null and es.status != 'withdrawn') as studentCount
        from groups g where g.class_id = ? order by g.active desc, g.sort_order`
     ).all(classId).map((row) => ({ ...(row as Record<string, unknown>), active: Boolean((row as Record<string, unknown>).active) }));
     res.json({ groups });
@@ -504,8 +579,10 @@ export function createApiRouter(db: DatabaseSync) {
       const activeCount = (db.prepare("select count(*) as count from groups where class_id = ? and active = 1").get(classId) as { count: number }).count;
       if (activeCount <= 1) return void res.status(400).json({ error: "班级至少保留一个小组" });
       const assigned = db.prepare(
-        `select 1 from group_assignments ga join enrollments e on e.id = ga.enrollment_id
-          where ga.group_id = ? and ga.effective_to_sequence is null and e.inactive_from_sequence is null limit 1`
+        `select 1 from group_assignments ga
+          join enrollments e on e.id = ga.enrollment_id
+          join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+          where ga.group_id = ? and ga.effective_to_sequence is null and es.status != 'withdrawn' limit 1`
       ).get(groupId);
       if (assigned) return void res.status(400).json({ error: "请先把该组学员转入其他小组" });
       db.prepare("update groups set active = 0, archived_at = current_timestamp where id = ?").run(groupId);
@@ -518,13 +595,26 @@ export function createApiRouter(db: DatabaseSync) {
     const students = db.prepare(
       `select e.id, e.id as studentId, e.person_id as personId, p.name, p.dharma_name as dharmaName,
               p.phone, e.note, g.id as groupId, g.name as groupName,
-              case when e.inactive_from_sequence is null then 1 else 0 end as active,
+              es.status,
+              (select group_concat(er.role) from enrollment_roles er where er.enrollment_id = e.id) as roleCsv,
+              case when m.enrollment_id is not null then 1 else 0 end as isMonitor,
               e.active_from_sequence as activeFromSequence, e.inactive_from_sequence as inactiveFromSequence
          from enrollments e join persons p on p.id = e.person_id
          left join group_assignments ga on ga.enrollment_id = e.id and ga.effective_to_sequence is null
          left join groups g on g.id = ga.group_id
-        where e.class_id = ? order by active desc, g.sort_order, p.name`
-    ).all(classId).map((row) => ({ ...(row as Record<string, unknown>), active: Boolean((row as Record<string, unknown>).active) }));
+         join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+         left join class_monitors m on m.class_id = e.class_id and m.enrollment_id = e.id
+        where e.class_id = ?
+        order by case es.status when 'normal' then 0 when 'leave' then 1 else 2 end, g.sort_order, p.name`
+    ).all(classId).map((row) => {
+      const item = row as Record<string, unknown>;
+      const roles = item.roleCsv ? String(item.roleCsv).split(",") : [];
+      return {
+        ...item,
+        active: item.status === "normal",
+        identities: [...(item.isMonitor ? ["monitor"] : []), ...roles, "student"]
+      };
+    });
     const visible = req.classPermission === "monitor"
       ? students.map((student) => {
           const { phone: _phone, note: _note, personId: _personId, ...safe } = student as Record<string, unknown>;
@@ -543,7 +633,10 @@ export function createApiRouter(db: DatabaseSync) {
     db.exec("begin immediate");
     try {
       const person = createOrUpdatePerson(db, { name, dharmaName: req.body.dharmaName, phone: String(req.body.phone ?? "") });
-      const id = insertEnrollment(db, { classId, personId: person.personId, groupId, note: req.body.note, effectiveSequence });
+      const id = insertEnrollment(db, {
+        classId, personId: person.personId, groupId, note: req.body.note, effectiveSequence,
+        status: parseEnrollmentStatus(req.body.status), roles: parseEnrollmentRoles(req.body.identities ?? req.body.roles)
+      });
       db.exec("commit"); res.json({ id, studentId: id, effectiveSequence });
     } catch (error) { db.exec("rollback"); throw error; }
   });
@@ -553,13 +646,20 @@ export function createApiRouter(db: DatabaseSync) {
     const row = db.prepare(
       `select e.person_id as personId, e.active_from_sequence as activeFromSequence,
               e.inactive_from_sequence as inactiveFromSequence, p.phone,
+              es.status as currentStatus,
               (select id from users where person_id = e.person_id) as userId
-         from enrollments e join persons p on p.id = e.person_id where e.id = ? and e.class_id = ?`
-    ).get(enrollmentId, classId) as { personId: number; activeFromSequence: number; inactiveFromSequence: number | null; phone: string; userId: number | null } | undefined;
+         from enrollments e
+         join persons p on p.id = e.person_id
+         join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+        where e.id = ? and e.class_id = ?`
+    ).get(enrollmentId, classId) as { personId: number; activeFromSequence: number; inactiveFromSequence: number | null; phone: string; userId: number | null; currentStatus: EnrollmentStatus } | undefined;
     if (!row) return void res.status(404).json({ error: "学员不存在" });
-    if (req.body.active === false && row.inactiveFromSequence === null &&
+    const requestedStatus = req.body.status !== undefined
+      ? parseEnrollmentStatus(req.body.status, row.currentStatus)
+      : req.body.active === false ? "withdrawn" : row.currentStatus;
+    if (requestedStatus !== "normal" && row.currentStatus === "normal" &&
       db.prepare("select 1 from class_monitors where class_id = ? and enrollment_id = ?").get(classId, enrollmentId)) {
-      return void res.status(400).json({ error: "该学员当前是班长，请先更换或取消班长后再停用" });
+      return void res.status(400).json({ error: "该学员当前是班长，请先更换或取消班长后再修改状态" });
     }
     const effectiveSequence = getNextEffectiveSequence(db, classId);
     db.exec("begin immediate");
@@ -581,19 +681,27 @@ export function createApiRouter(db: DatabaseSync) {
       }
       if (req.body.note !== undefined) db.prepare("update enrollments set note = ?, updated_at = current_timestamp where id = ?")
         .run(String(req.body.note || "").trim() || null, enrollmentId);
+      const currentGroup = db.prepare(
+        "select group_id as groupId from group_assignments where enrollment_id = ? and effective_to_sequence is null"
+      ).get(enrollmentId) as { groupId: number };
+      const groupId = req.body.groupId === undefined ? currentGroup.groupId : numberParam(req.body.groupId, "小组");
+      if (requestedStatus !== "withdrawn" &&
+        !db.prepare("select 1 from groups where id = ? and class_id = ? and active = 1").get(groupId, classId)) {
+        throw new Error("该学员原小组已停用，请先选择当前小组后再恢复状态");
+      }
       if (req.body.groupId !== undefined) {
-        const groupId = numberParam(req.body.groupId, "小组");
         if (!db.prepare("select 1 from groups where id = ? and class_id = ? and active = 1").get(groupId, classId)) throw new Error("小组无效");
         setEnrollmentGroupFromSequence(db, enrollmentId, groupId, effectiveSequence);
       }
-      if (req.body.active === false && row.inactiveFromSequence === null) {
-        const hasHistory = db.prepare("select 1 from lesson_roster where enrollment_id = ? limit 1").get(enrollmentId);
-        if (!hasHistory && effectiveSequence <= row.activeFromSequence) {
-          db.prepare("delete from enrollments where id = ?").run(enrollmentId);
-        } else {
-          db.prepare("update enrollments set inactive_from_sequence = ?, updated_at = current_timestamp where id = ?")
-            .run(Math.max(effectiveSequence, row.activeFromSequence + 1), enrollmentId);
-        }
+      if (req.body.identities !== undefined || req.body.roles !== undefined || req.body.groupId !== undefined) {
+        const roles = req.body.identities !== undefined || req.body.roles !== undefined
+          ? parseEnrollmentRoles(req.body.identities ?? req.body.roles)
+          : (db.prepare("select role from enrollment_roles where enrollment_id = ?").all(enrollmentId) as Array<{ role: EnrollmentRole }>).map((item) => item.role);
+        updateEnrollmentRoles(db, enrollmentId, classId, groupId, roles);
+      }
+      if (requestedStatus !== row.currentStatus) {
+        if (requestedStatus !== "withdrawn") assertPersonAvailableForEnrollment(db, row.personId, classId);
+        setEnrollmentStatusFromSequence(db, enrollmentId, requestedStatus, effectiveSequence);
       }
       db.exec("commit"); res.json({ ok: true, effectiveSequence });
     } catch (error) { db.exec("rollback"); throw error; }
@@ -620,6 +728,8 @@ export function createApiRouter(db: DatabaseSync) {
       { header: "法名", key: "dharmaName", width: 18 },
       { header: "电话", key: "phone", width: 20 },
       { header: "小组", key: "groupName", width: 18 },
+      { header: "状态", key: "status", width: 14 },
+      { header: "身份", key: "identities", width: 28 },
       { header: "备注", key: "note", width: 30 }
     ];
     roster.getRow(1).font = { bold: true };
@@ -629,13 +739,17 @@ export function createApiRouter(db: DatabaseSync) {
       allowBlank: false,
       formulae: [`"${groups.map((group) => group.name.replaceAll('"', '""')).join(",")}"`]
     };
-    for (let row = 2; row <= 1000; row += 1) roster.getCell(`D${row}`).dataValidation = groupValidation;
+    for (let row = 2; row <= 1000; row += 1) {
+      roster.getCell(`D${row}`).dataValidation = groupValidation;
+      roster.getCell(`E${row}`).dataValidation = { type: "list", allowBlank: true, formulae: ['"正常,休学,退学"'] };
+    }
     const instructions = workbook.addWorksheet("填写说明");
     instructions.columns = [{ width: 24 }, { width: 72 }];
     instructions.addRows([
       ["班级", classRow.name],
       ["必填列", "姓名、电话、小组"],
-      ["选填列", "法名、备注"],
+      ["选填列", "法名、状态、身份、备注；状态留空按正常，身份留空按学员"],
+      ["身份填写", "可填写组长、慈善、传灯、文宣，多个身份用顿号分隔；班长请在班级设置中任命。"],
       ["电话格式", "可填写中国大陆手机号；未写国家区号时默认按 +86 处理。"],
       ["可用小组", groups.map((group) => group.name).join("、")],
       ["导入流程", "上传后先预览新增、更新、重复和冲突，确认无冲突后再提交。"]
@@ -663,8 +777,13 @@ export function createApiRouter(db: DatabaseSync) {
         if (existing) {
           db.prepare("update enrollments set note = ?, updated_at = current_timestamp where id = ?").run(item.note, existing.id);
           setEnrollmentGroupFromSequence(db, existing.id, groupId, effectiveSequence);
+          updateEnrollmentRoles(db, existing.id, classId, groupId, item.identities);
+          setEnrollmentStatusFromSequence(db, existing.id, item.status, effectiveSequence);
         } else {
-          insertEnrollment(db, { classId, personId: person.personId, groupId, note: item.note, effectiveSequence });
+          insertEnrollment(db, {
+            classId, personId: person.personId, groupId, note: item.note, effectiveSequence,
+            status: item.status, roles: item.identities
+          });
         }
         importedCount += 1;
       }
@@ -737,8 +856,11 @@ export function createApiRouter(db: DatabaseSync) {
     if (classRow.archived) return void res.status(400).json({ error: "已归档班级不能设置班长" });
     const enrollmentId = numberParam(req.body.studentId ?? req.body.enrollmentId, "学员");
     const student = db.prepare(
-      `select e.id, e.person_id as personId, p.name, p.phone from enrollments e join persons p on p.id = e.person_id
-        where e.id = ? and e.class_id = ? and e.inactive_from_sequence is null`
+      `select e.id, e.person_id as personId, p.name, p.phone
+         from enrollments e
+         join persons p on p.id = e.person_id
+         join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+        where e.id = ? and e.class_id = ? and es.status = 'normal'`
     ).get(enrollmentId, classId) as { id: number; personId: number; name: string; phone: string } | undefined;
     if (!student) return void res.status(400).json({ error: "班长必须从本班在册学员中选择" });
     db.exec("begin immediate");

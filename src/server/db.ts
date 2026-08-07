@@ -31,6 +31,7 @@ function runMigrations(db: DatabaseSync): void {
   if (!applied.has(1)) migrationOne(db);
   if (!applied.has(2)) migrationTwo(db);
   if (!applied.has(3)) migrationThree(db);
+  if (!applied.has(4)) migrationFour(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -231,6 +232,56 @@ function migrationThree(db: DatabaseSync): void {
       select id, counselor_user_id, created_by, created_at from classes;
       create index class_counselor_history_user_idx on class_counselor_history(counselor_user_id);
       insert into schema_migrations (version) values (3);
+    `);
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function migrationFour(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    db.exec(`
+      create table enrollment_status_history (
+        id integer primary key autoincrement,
+        enrollment_id integer not null references enrollments(id) on delete cascade,
+        status text not null check(status in ('normal', 'leave', 'withdrawn')),
+        effective_from_sequence integer not null,
+        effective_to_sequence integer,
+        created_at text not null default current_timestamp,
+        check(effective_to_sequence is null or effective_to_sequence > effective_from_sequence)
+      );
+      create unique index enrollment_status_start_unique
+        on enrollment_status_history(enrollment_id, effective_from_sequence);
+      create index enrollment_status_current_idx
+        on enrollment_status_history(enrollment_id, effective_to_sequence);
+
+      create trigger enrollments_default_status
+      after insert on enrollments
+      when not exists (select 1 from enrollment_status_history where enrollment_id = new.id)
+      begin
+        insert into enrollment_status_history (enrollment_id, status, effective_from_sequence)
+        values (new.id, 'normal', new.active_from_sequence);
+      end;
+
+      insert into enrollment_status_history
+        (enrollment_id, status, effective_from_sequence, effective_to_sequence)
+      select id, 'normal', active_from_sequence, inactive_from_sequence from enrollments;
+      insert into enrollment_status_history
+        (enrollment_id, status, effective_from_sequence)
+      select id, 'withdrawn', inactive_from_sequence from enrollments
+       where inactive_from_sequence is not null;
+
+      create table enrollment_roles (
+        enrollment_id integer not null references enrollments(id) on delete cascade,
+        role text not null check(role in ('group_leader', 'charity', 'dharma_light', 'communications')),
+        created_at text not null default current_timestamp,
+        primary key(enrollment_id, role)
+      );
+
+      insert into schema_migrations (version) values (4);
     `);
     db.exec("commit");
   } catch (error) {

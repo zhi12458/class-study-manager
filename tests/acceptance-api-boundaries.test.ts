@@ -292,8 +292,9 @@ describe("API 边界、事务与文件响应验收", () => {
       await templateWorkbook.xlsx.load(template.body as unknown as ExcelJS.Buffer);
       expect(templateWorkbook.worksheets.map((sheet) => sheet.name)).toEqual(["学员名单", "填写说明"]);
       const roster = templateWorkbook.getWorksheet("学员名单")!;
-      expect(roster.getRow(1).values).toEqual([, "姓名", "法名", "电话", "小组", "备注"]);
+      expect(roster.getRow(1).values).toEqual([, "姓名", "法名", "电话", "小组", "状态", "身份", "备注"]);
       expect(roster.getCell("D2").dataValidation).toMatchObject({ type: "list", formulae: ['"第一组"'] });
+      expect(roster.getCell("E2").dataValidation).toMatchObject({ type: "list", allowBlank: true });
     });
   });
 });

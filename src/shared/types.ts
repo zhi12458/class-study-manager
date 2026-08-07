@@ -20,6 +20,10 @@ export type AttendanceStatus = OutlineStatus | GroupStudyStatus | ClassStudyStat
 export const REPORT_RANGES = ["recent", "month", "three_months", "history"] as const;
 export type ReportRange = (typeof REPORT_RANGES)[number];
 
+export const ENROLLMENT_STATUSES = ["normal", "leave", "withdrawn"] as const;
+export type EnrollmentStatus = (typeof ENROLLMENT_STATUSES)[number];
+export type EnrollmentRole = "monitor" | "group_leader" | "charity" | "dharma_light" | "communications" | "student";
+
 export type ClassPermission = "counselor" | "monitor";
 
 export interface ClassAccess {
