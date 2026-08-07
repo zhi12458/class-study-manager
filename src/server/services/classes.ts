@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { CadenceMode, LessonScheduleItem, LessonType } from "../../shared/types.js";
+import { courseTitlesForRange } from "../../shared/courseCatalog.js";
 import { generateSchedule, insertBreak, shiftScheduleFrom } from "./schedule.js";
 import { freezeStartedLessons } from "./roster.js";
 
@@ -52,7 +53,8 @@ export function createClass(db: DatabaseSync, input: {
     for (let index = 0; index < input.groupCount; index += 1) insertGroup.run(classId, DEFAULT_GROUP_NAMES[index], index + 1);
     if (input.firstDueDate) {
       insertLessons(db, classId, generateSchedule({
-        firstFinalDueDate: input.firstDueDate, count: input.lessonCount ?? 24, cadenceMode: input.cadenceMode
+        firstFinalDueDate: input.firstDueDate, count: input.lessonCount ?? 24, cadenceMode: input.cadenceMode,
+        titles: courseTitlesForRange(1, input.lessonCount ?? 24)
       }));
     }
     db.exec("commit");
@@ -70,7 +72,10 @@ export function appendLessons(db: DatabaseSync, classId: number, count = 24): nu
   if (existing.length === 0) throw new Error("请先设置第一课截止日");
   const last = existing.at(-1)!;
   const nextDue = addDays(last.classStudyDueDate, cls.cadenceMode === "parallel_two_week" ? 14 : 7);
-  const generated = generateSchedule({ firstFinalDueDate: nextDue, count, cadenceMode: cls.cadenceMode, startSequence: last.sequence + 1 });
+  const generated = generateSchedule({
+    firstFinalDueDate: nextDue, count, cadenceMode: cls.cadenceMode, startSequence: last.sequence + 1,
+    titles: courseTitlesForRange(last.sequence + 1, count)
+  });
   db.exec("begin immediate");
   try { insertLessons(db, classId, generated); db.exec("commit"); }
   catch (error) { db.exec("rollback"); throw error; }
@@ -88,7 +93,10 @@ export function setInitialSchedule(
   if (existing.length > 0) throw new Error("课表已存在");
   const cls = db.prepare("select cadence_mode as cadenceMode from classes where id = ?").get(classId) as { cadenceMode: CadenceMode };
   const cadenceMode = cadenceOverride ?? cls.cadenceMode;
-  const generated = generateSchedule({ firstFinalDueDate: firstDueDate, count, cadenceMode });
+  const generated = generateSchedule({
+    firstFinalDueDate: firstDueDate, count, cadenceMode,
+    titles: courseTitlesForRange(1, count)
+  });
   db.exec("begin immediate");
   try {
     if (cadenceOverride) {

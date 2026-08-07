@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createPasswordHash } from "./auth.js";
+import { DEFAULT_COURSE_TITLES } from "../shared/courseCatalog.js";
 
 export function getDefaultDbPath(): string {
   return process.env.DB_PATH ?? path.join(process.cwd(), "data", "class-study.sqlite");
@@ -32,6 +33,7 @@ function runMigrations(db: DatabaseSync): void {
   if (!applied.has(2)) migrationTwo(db);
   if (!applied.has(3)) migrationThree(db);
   if (!applied.has(4)) migrationFour(db);
+  if (!applied.has(5)) migrationFive(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -283,6 +285,24 @@ function migrationFour(db: DatabaseSync): void {
 
       insert into schema_migrations (version) values (4);
     `);
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function migrationFive(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    const update = db.prepare(
+      "update lessons set title = ?, updated_at = current_timestamp where sequence = ? and title = ?"
+    );
+    DEFAULT_COURSE_TITLES.forEach((title, index) => {
+      const sequence = index + 1;
+      update.run(title, sequence, `第${sequence}课`);
+    });
+    db.prepare("insert into schema_migrations (version) values (5)").run();
     db.exec("commit");
   } catch (error) {
     db.exec("rollback");
