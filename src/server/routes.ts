@@ -422,7 +422,7 @@ export function createApiRouter(db: DatabaseSync) {
       name: String(req.body.name ?? ""), counselorUserId, createdBy: req.user!.id,
       groupCount: Number(req.body.groupCount ?? 3), cadenceMode,
       firstDueDate: req.body.firstDueDate ? validDate(req.body.firstDueDate) : undefined,
-      lessonCount: req.body.lessonCount ? Number(req.body.lessonCount) : 24
+      lessonCount: req.body.lessonCount ? Number(req.body.lessonCount) : 50
     });
     res.json({ id, classId: id });
   });
@@ -812,8 +812,8 @@ export function createApiRouter(db: DatabaseSync) {
     const firstDueDate = req.body.firstDueDate ?? req.body.firstClassStudyDueDate;
     const cadenceMode = req.body.cadenceMode === undefined ? undefined : String(req.body.cadenceMode) as CadenceMode;
     if (cadenceMode !== undefined && !CADENCE_MODES.includes(cadenceMode)) return void res.status(400).json({ error: "学习模式无效" });
-    setInitialSchedule(db, classId, validDate(firstDueDate), Number(req.body.count ?? 24), cadenceMode);
-    res.json({ generatedCount: Number(req.body.count ?? 24) });
+    setInitialSchedule(db, classId, validDate(firstDueDate), Number(req.body.count ?? 50), cadenceMode);
+    res.json({ generatedCount: Number(req.body.count ?? 50) });
   });
 
   router.post("/classes/:classId/lessons/append", requireAuth, requireClassAccess(db, true), (req, res) => {

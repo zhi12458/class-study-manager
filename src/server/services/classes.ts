@@ -52,9 +52,9 @@ export function createClass(db: DatabaseSync, input: {
     const insertGroup = db.prepare("insert into groups (class_id, name, sort_order) values (?, ?, ?)");
     for (let index = 0; index < input.groupCount; index += 1) insertGroup.run(classId, DEFAULT_GROUP_NAMES[index], index + 1);
     if (input.firstDueDate) {
-      const coursePlan = coursePlanForRange(1, input.lessonCount ?? 24);
+      const coursePlan = coursePlanForRange(1, input.lessonCount ?? 50);
       insertLessons(db, classId, generateSchedule({
-        firstFinalDueDate: input.firstDueDate, count: input.lessonCount ?? 24, cadenceMode: input.cadenceMode,
+        firstFinalDueDate: input.firstDueDate, count: input.lessonCount ?? 50, cadenceMode: input.cadenceMode,
         ...coursePlan
       }));
     }
@@ -87,7 +87,7 @@ export function setInitialSchedule(
   db: DatabaseSync,
   classId: number,
   firstDueDate: string,
-  count = 24,
+  count = 50,
   cadenceOverride?: CadenceMode
 ): void {
   const existing = lessonRows(db, classId);

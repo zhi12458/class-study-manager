@@ -36,13 +36,13 @@ describe("旧系统课程目录", () => {
       groupCount: 3,
       cadenceMode: "same_week",
       firstDueDate: "2026-08-09",
-      lessonCount: 24,
     });
 
     const lessons = db.prepare(
       "select sequence, title, lesson_type as lessonType from lessons where class_id = ? order by sequence"
     ).all(classId) as Array<{ sequence: number; title: string; lessonType: string }>;
-    expect(lessons.map((lesson) => lesson.title)).toEqual(DEFAULT_COURSES.slice(0, 24).map((course) => course.title));
+    expect(lessons).toHaveLength(50);
+    expect(lessons.map((lesson) => lesson.title)).toEqual(DEFAULT_COURSES.map((course) => course.title));
     expect(lessons[6].lessonType).toBe("review");
     expect(lessons[20].lessonType).toBe("review");
   });

@@ -1063,7 +1063,7 @@ function LessonEditor({ classId, lesson, onClose, onSaved }: { classId: number; 
 
 function GenerateSchedule({ classId, defaultMode, hasLessons, onClose, onSaved }: { classId: number; defaultMode: CadenceMode; hasLessons: boolean; onClose: () => void; onSaved: () => Promise<void> }) {
   const [firstDueDate, setFirstDueDate] = useState("");
-  const [count, setCount] = useState(24);
+  const [count, setCount] = useState(hasLessons ? 24 : 50);
   const [cadenceMode, setCadenceMode] = useState<CadenceMode>(defaultMode);
   const [notice, setNotice] = useState<NoticeState>(null);
   const [loading, setLoading] = useState(false);
@@ -1135,7 +1135,7 @@ function LessonsPage({ currentClass }: { currentClass: ClassSummary }) {
   return <main className="page">
     <PageHeader eyebrow="SCHEDULE" title="课表安排" description="安排普通课、复习课与暂停周；已开始的课次不会被重新排期。" actions={<><button className="secondary" onClick={() => setShowBreak(true)}><Plus size={17} /> 放假 / 暂停周</button><button className="primary" onClick={() => setShowGenerate(true)}><CalendarDays size={17} /> {lessons.length ? "追加 / 生成课表" : "生成课表"}</button></>} />
     <Notice notice={notice} onClose={() => setNotice(null)} />
-    {loading ? <Loading text="正在读取课表..." /> : timeline.length === 0 ? <EmptyState icon={<CalendarDays size={28} />} title="还没有课表" detail="设置第一课班修截止日，默认一次生成 24 课。" action={<button className="primary" onClick={() => setShowGenerate(true)}>生成 24 课</button>} /> : <section className="panel schedule-panel">
+    {loading ? <Loading text="正在读取课表..." /> : timeline.length === 0 ? <EmptyState icon={<CalendarDays size={28} />} title="还没有课表" detail="设置第一课班修截止日，默认一次生成旧系统完整 50 课。" action={<button className="primary" onClick={() => setShowGenerate(true)}>生成 50 课</button>} /> : <section className="panel schedule-panel">
       <div className="schedule-legend"><span><i className="dot current" /> 当前 / 近期</span><span><i className="dot future" /> 未开始</span><span><i className="dot review" /> 复习课</span><span><i className="dot break" /> 暂停周</span></div>
       <div className="schedule-list">{timeline.map((entry) => entry.type === "break" ? <article className="schedule-break" key={`break-${entry.breakItem.id}`}><div className="timeline-node"><CloudSun size={17} /></div><div><strong>{entry.breakItem.title}</strong><span>{entry.breakItem.date} · 本周不考勤，后续课表已顺延</span></div></article> : <article className={`schedule-row ${entry.lesson.status ?? (entry.lesson.started ? "finished" : "future")}`} key={entry.lesson.id}><div className="timeline-node">{entry.lesson.lessonNumber}</div><div className="schedule-main"><div><strong>{entry.lesson.title}</strong><span className={`lesson-type ${entry.lesson.lessonType}`}>{entry.lesson.lessonType === "review" ? "复习课" : "普通课"}</span></div><small>{entry.lesson.cadenceMode === "same_week" ? "同周完成" : "平行两周"}</small></div><div className="lesson-dates"><span><small>导图/提纲</small>{entry.lesson.lessonType === "review" ? "不需要" : entry.lesson.outlineDueDate}</span><span><small>组修</small>{entry.lesson.groupStudyDueDate}</span><span><small>班修</small>{entry.lesson.classStudyDueDate}</span></div><button className="icon-button" onClick={() => setEditing(entry.lesson)} disabled={entry.lesson.started} title={entry.lesson.started ? "已开始课次不可改期" : "编辑课次"}><Pencil size={16} /></button></article>)}</div>
     </section>}
