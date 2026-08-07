@@ -45,6 +45,9 @@ export function createClass(db: DatabaseSync, input: {
       `insert into classes (name, counselor_user_id, cadence_mode, created_by) values (?, ?, ?, ?)`
     ).run(input.name.trim(), input.counselorUserId, input.cadenceMode, input.createdBy);
     const classId = Number(result.lastInsertRowid);
+    db.prepare(
+      "insert into class_counselor_history (class_id, counselor_user_id, assigned_by) values (?, ?, ?)"
+    ).run(classId, input.counselorUserId, input.createdBy);
     const insertGroup = db.prepare("insert into groups (class_id, name, sort_order) values (?, ?, ?)");
     for (let index = 0; index < input.groupCount; index += 1) insertGroup.run(classId, DEFAULT_GROUP_NAMES[index], index + 1);
     if (input.firstDueDate) {

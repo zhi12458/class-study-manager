@@ -34,7 +34,7 @@ export function requireClassAccess(db: DatabaseSync, manage = false) {
       | { archived: number; counselorUserId: number }
       | undefined;
     if (!classRow) return void res.status(404).json({ error: "班级不存在" });
-    if (req.user.isAdmin || classRow.counselorUserId === req.user.id) {
+    if (req.user.isAdmin || (req.user.canCounsel && classRow.counselorUserId === req.user.id)) {
       req.classPermission = "counselor";
       next();
       return;

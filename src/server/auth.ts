@@ -75,12 +75,12 @@ export function listClassAccesses(db: DatabaseSync, user: AuthUser): ClassAccess
   }
   const rows = db.prepare(
     `select c.id as classId, c.name as className, c.archived,
-            case when c.counselor_user_id = ? then 'counselor' else 'monitor' end as permission
+            case when ? = 1 and c.counselor_user_id = ? then 'counselor' else 'monitor' end as permission
        from classes c
        left join class_monitors m on m.class_id = c.id
-      where c.counselor_user_id = ? or (m.user_id = ? and c.archived = 0)
+      where (? = 1 and c.counselor_user_id = ?) or (m.user_id = ? and c.archived = 0)
       order by c.archived, c.id desc`
-  ).all(user.id, user.id, user.id) as Array<Record<string, unknown>>;
+  ).all(user.canCounsel ? 1 : 0, user.id, user.canCounsel ? 1 : 0, user.id, user.id) as Array<Record<string, unknown>>;
   return rows.map((row) => ({
     classId: Number(row.classId), className: String(row.className),
     permission: row.permission === "counselor" ? "counselor" : "monitor", archived: Boolean(row.archived)

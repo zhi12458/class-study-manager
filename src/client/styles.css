@@ -242,6 +242,9 @@ td strong { color: #253b55; }
 .upload-zone span { color: var(--muted); font-size: 12px; font-weight: 500; }
 .compact-table { max-height: 390px; border: 1px solid var(--line); border-radius: 11px; }
 .compact-table th { position: sticky; top: 0; z-index: 1; }
+.counselor-table table { min-width: 760px; }
+.counselor-table .cell-note { color: var(--muted); }
+.secondary.compact { min-height: 32px; padding: 0 12px; }
 .row-error { background: #fff6f7; }
 .action-badge { padding: 4px 7px; color: #687b8c; background: #edf2f5; }
 .action-badge.create { color: #087952; background: #e8f8f2; }

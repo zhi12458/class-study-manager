@@ -29,6 +29,8 @@ function runMigrations(db: DatabaseSync): void {
     (db.prepare("select version from schema_migrations").all() as Array<{ version: number }>).map((row) => row.version)
   );
   if (!applied.has(1)) migrationOne(db);
+  if (!applied.has(2)) migrationTwo(db);
+  if (!applied.has(3)) migrationThree(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -188,6 +190,48 @@ function migrationOne(db: DatabaseSync): void {
       create index attendance_lesson_idx on attendance_entries(lesson_id);
     `);
     db.prepare("insert into schema_migrations (version) values (1)").run();
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function migrationTwo(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    db.exec(`
+      alter table users add column counselor_role integer not null default 0 check(counselor_role in (0, 1));
+      update users
+         set counselor_role = 1
+       where can_counsel = 1
+          or id in (select counselor_user_id from classes);
+      insert into schema_migrations (version) values (2);
+    `);
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function migrationThree(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    db.exec(`
+      create table class_counselor_history (
+        id integer primary key autoincrement,
+        class_id integer not null references classes(id) on delete cascade,
+        counselor_user_id integer not null references users(id),
+        assigned_by integer not null references users(id),
+        assigned_at text not null default current_timestamp,
+        ended_at text
+      );
+      insert into class_counselor_history (class_id, counselor_user_id, assigned_by, assigned_at)
+      select id, counselor_user_id, created_by, created_at from classes;
+      create index class_counselor_history_user_idx on class_counselor_history(counselor_user_id);
+      insert into schema_migrations (version) values (3);
+    `);
     db.exec("commit");
   } catch (error) {
     db.exec("rollback");

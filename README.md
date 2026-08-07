@@ -7,6 +7,8 @@
 - 新系统数据：`/opt/class-study-manager/data`
 - 新系统备份：`/opt/class-study-manager/backups`
 
+面向管理员、辅导员和班长的操作说明见：[简明使用说明](docs/简明使用说明.md)。
+
 ## 本机开发与验收
 
 当前 Mac 需要 Node.js 24 和 npm。本机不需要安装 Docker Desktop，也不以 GitHub 检查作为验收条件。

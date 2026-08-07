@@ -477,11 +477,13 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
   const [counselors, setCounselors] = useState<Counselor[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [showCounselor, setShowCounselor] = useState(false);
+  const [showCounselorManager, setShowCounselorManager] = useState(false);
   const [name, setName] = useState("");
   const [groupCount, setGroupCount] = useState(3);
   const [counselorId, setCounselorId] = useState("");
   const [cadenceMode, setCadenceMode] = useState<CadenceMode>("same_week");
   const [notice, setNotice] = useState<NoticeState>(null);
+  const [counselorNotice, setCounselorNotice] = useState<NoticeState>(null);
   const [loading, setLoading] = useState(false);
 
   const loadCounselors = useCallback(async () => {
@@ -490,7 +492,10 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
       const data = await apiJson<unknown>("/api/admin/counselors");
       setCounselors(asList<Record<string, unknown>>(data, "counselors", "items").map((raw) => ({
         id: Number(raw.id ?? raw.accountId), personId: raw.personId == null ? undefined : Number(raw.personId),
-        displayName: String(raw.displayName ?? raw.name ?? ""), phone: String(raw.phone ?? ""), active: raw.active == null ? true : Boolean(raw.active)
+        displayName: String(raw.displayName ?? raw.name ?? ""), phone: String(raw.phone ?? ""), active: raw.active == null ? true : Boolean(raw.active),
+        accountActive: raw.accountActive == null ? undefined : Boolean(raw.accountActive),
+        activeClassCount: Number(raw.activeClassCount ?? 0), archivedClassCount: Number(raw.archivedClassCount ?? 0),
+        monitorClassCount: Number(raw.monitorClassCount ?? 0), deletable: Boolean(raw.deletable)
       })));
     } catch (error) {
       setNotice({ tone: "error", text: errorText(error) });
@@ -540,6 +545,32 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
     finally { setLoading(false); }
   }
 
+  async function toggleCounselor(counselor: Counselor) {
+    const nextActive = counselor.active === false;
+    const action = nextActive ? "恢复" : "停用";
+    if (!window.confirm(`确定${action}辅导员“${counselor.displayName}”吗？`)) return;
+    setLoading(true); setCounselorNotice(null);
+    try {
+      await apiJson(`/api/admin/counselors/${counselor.id}`, {
+        method: "PATCH", body: JSON.stringify({ active: nextActive })
+      });
+      await Promise.all([loadCounselors(), onRefresh()]);
+      setCounselorNotice({ tone: "success", text: `${counselor.displayName} 已${action}` });
+    } catch (error) { setCounselorNotice({ tone: "error", text: errorText(error) }); }
+    finally { setLoading(false); }
+  }
+
+  async function deleteCounselor(counselor: Counselor) {
+    if (!window.confirm(`确定永久删除未使用的辅导员账号“${counselor.displayName}”吗？此操作不能撤销。`)) return;
+    setLoading(true); setCounselorNotice(null);
+    try {
+      await apiJson(`/api/admin/counselors/${counselor.id}`, { method: "DELETE" });
+      await loadCounselors();
+      setCounselorNotice({ tone: "success", text: `${counselor.displayName} 的未使用账号已永久删除` });
+    } catch (error) { setCounselorNotice({ tone: "error", text: errorText(error) }); }
+    finally { setLoading(false); }
+  }
+
   function enterClass(id: number) {
     onSelect(id);
     go("/overview");
@@ -552,6 +583,7 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
     <main className="page">
       <PageHeader eyebrow="CLASS SPACES" title="全部班级" description="创建、切换并管理您有权限访问的班级。" actions={<>
         {user.isAdmin && <button className="secondary" onClick={() => setShowCounselor(true)}><UserPlus size={17} /> 新建辅导员</button>}
+        {user.isAdmin && <button className="secondary" onClick={() => { setCounselorNotice(null); setShowCounselorManager(true); }}><UserCog size={17} /> 管理辅导员</button>}
         {(user.isAdmin || user.canCounsel) && <button className="primary" onClick={() => setShowCreate(true)}><Plus size={17} /> 新建班级</button>}
       </>} />
       <Notice notice={notice} onClose={() => setNotice(null)} />
@@ -595,6 +627,27 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
           <label>手机号<input name="phone" inputMode="tel" placeholder="未填区号时默认 +86" required /></label>
           <div className="modal-actions"><button type="button" className="ghost" onClick={() => setShowCounselor(false)}>取消</button><button className="primary" disabled={loading}>{loading ? "创建中..." : "创建并生成密码"}</button></div>
         </form>
+      </Modal>}
+      {showCounselorManager && <Modal title="辅导员账号管理" subtitle="先转交未归档班级，再停用辅导员；有历史记录的账号不会被物理删除。" onClose={() => setShowCounselorManager(false)} wide>
+        <div className="form-stack">
+          <Notice notice={counselorNotice} onClose={() => setCounselorNotice(null)} />
+          {counselors.length === 0 ? <EmptyState title="还没有辅导员账号" detail="请先创建辅导员。" /> : <><div className="table-wrap counselor-table desktop-table"><table><thead><tr><th>辅导员</th><th>负责班级</th><th>其他身份</th><th>状态</th><th aria-label="操作" /></tr></thead><tbody>{counselors.map((counselor) => <tr key={counselor.id}>
+            <td><div className="person-cell"><div className="mini-avatar">{counselor.displayName.slice(0, 1)}</div><span><strong>{counselor.displayName}</strong><small>{counselor.phone}</small></span></div></td>
+            <td><strong>{counselor.activeClassCount ?? 0}</strong> 个进行中<small className="cell-note">{counselor.archivedClassCount ? `${counselor.archivedClassCount} 个已归档` : "无已归档班级"}</small></td>
+            <td>{counselor.monitorClassCount ? <span className="soft-badge">兼任班长</span> : "—"}</td>
+            <td><span className={`state-dot ${counselor.active === false ? "inactive" : ""}`}>{counselor.active === false ? "已停用" : "正常"}</span></td>
+            <td><div className="row-actions">
+              <button className="secondary compact" onClick={() => void toggleCounselor(counselor)} disabled={loading || (counselor.active !== false && Boolean(counselor.activeClassCount))} title={counselor.active !== false && counselor.activeClassCount ? "请先在班级设置中转交其负责的班级" : undefined}>{counselor.active === false ? "恢复" : "停用"}</button>
+              {counselor.deletable && <button className="text-danger" onClick={() => void deleteCounselor(counselor)} disabled={loading}>永久删除</button>}
+            </div></td>
+          </tr>)}</tbody></table></div><div className="mobile-card-list">{counselors.map((counselor) => <article className="student-card" key={counselor.id}>
+            <div className="person-cell"><div className="mini-avatar large">{counselor.displayName.slice(0, 1)}</div><span><strong>{counselor.displayName}</strong><small>{counselor.phone}</small></span><span className={`state-dot ${counselor.active === false ? "inactive" : ""}`}>{counselor.active === false ? "已停用" : "正常"}</span></div>
+            <dl><div><dt>负责班级</dt><dd>{counselor.activeClassCount ?? 0} 个进行中{counselor.archivedClassCount ? ` · ${counselor.archivedClassCount} 个已归档` : ""}</dd></div><div><dt>其他身份</dt><dd>{counselor.monitorClassCount ? "兼任班长" : "—"}</dd></div></dl>
+            <div className="card-actions"><button className="secondary" onClick={() => void toggleCounselor(counselor)} disabled={loading || (counselor.active !== false && Boolean(counselor.activeClassCount))} title={counselor.active !== false && counselor.activeClassCount ? "请先转交其负责的班级" : undefined}>{counselor.active === false ? "恢复" : "停用"}</button>{counselor.deletable && <button className="ghost danger" onClick={() => void deleteCounselor(counselor)} disabled={loading}>永久删除</button>}</div>
+          </article>)}</div></>}
+          <div className="permission-note"><strong>为什么有些账号不能删除？</strong><span>只要账号已经关联班级、学员、班长或考勤历史，就只能停用，以保证历史记录仍能显示正确的操作人。</span></div>
+          <div className="modal-actions"><button type="button" className="primary" onClick={() => setShowCounselorManager(false)}>完成</button></div>
+        </div>
       </Modal>}
     </main>
   );
@@ -848,10 +901,10 @@ function StudentsPage({ currentClass }: { currentClass: ClassSummary }) {
   });
 
   async function deactivate(student: Student) {
-    if (!window.confirm(`确定将“${student.name}”设为停用吗？该变化从下一课生效。`)) return;
+    if (!window.confirm(`确定将“${student.name}”移出班级吗？该变化从下一课生效，历史考勤仍会保留。`)) return;
     try {
       await apiJson(`/api/classes/${currentClass.id}/students/${student.id}`, { method: "PATCH", body: JSON.stringify({ active: false }) });
-      setNotice({ tone: "success", text: `${student.name} 已停用，将从下一课生效` }); await load();
+      setNotice({ tone: "success", text: `${student.name} 已移出班级，将从下一课生效` }); await load();
     } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
   }
 
@@ -861,8 +914,8 @@ function StudentsPage({ currentClass }: { currentClass: ClassSummary }) {
     <section className="panel">
       <div className="filter-bar"><label className="search-field"><span>搜索学员</span><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="姓名、法名或电话" /></label><label><span>小组</span><select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}><option value="all">全部小组</option>{groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label><div className="filter-count">共 <strong>{filtered.length}</strong> 人</div></div>
       {loading ? <Loading /> : filtered.length === 0 ? <EmptyState title="没有匹配的学员" detail="尝试调整筛选，或新增一位学员。" /> : <>
-        <div className="table-wrap desktop-table"><table><thead><tr><th>学员</th><th>手机号</th><th>小组</th><th>备注</th><th>状态</th><th aria-label="操作" /></tr></thead><tbody>{filtered.map((student) => <tr key={student.id}><td><div className="person-cell"><div className="mini-avatar">{student.name.slice(0, 1)}</div><span><strong>{student.name}</strong><small>{student.dharmaName || "未填写法名"}</small></span></div></td><td>{student.phone || "—"}</td><td><span className="soft-badge">{student.groupName || groups.find((g) => g.id === student.groupId)?.name || "待分组"}</span></td><td className="note-cell">{student.note || "—"}</td><td><span className={`state-dot ${student.active === false ? "inactive" : ""}`}>{student.active === false ? "已停用" : "在册"}</span></td><td><div className="row-actions"><button className="icon-button" title="编辑" onClick={() => setEditing(student)}><Pencil size={16} /></button>{student.active !== false && <button className="text-danger" onClick={() => void deactivate(student)}>停用</button>}</div></td></tr>)}</tbody></table></div>
-        <div className="mobile-card-list">{filtered.map((student) => <article className="student-card" key={student.id}><div className="person-cell"><div className="mini-avatar large">{student.name.slice(0, 1)}</div><span><strong>{student.name}</strong><small>{student.dharmaName || "未填写法名"}</small></span><span className={`state-dot ${student.active === false ? "inactive" : ""}`}>{student.active === false ? "已停用" : "在册"}</span></div><dl><div><dt>小组</dt><dd>{student.groupName || groups.find((g) => g.id === student.groupId)?.name || "待分组"}</dd></div><div><dt>电话</dt><dd>{student.phone || "—"}</dd></div><div><dt>备注</dt><dd>{student.note || "—"}</dd></div></dl><div className="card-actions"><button className="secondary" onClick={() => setEditing(student)}><Pencil size={15} /> 编辑</button>{student.active !== false && <button className="ghost danger" onClick={() => void deactivate(student)}>停用</button>}</div></article>)}</div>
+        <div className="table-wrap desktop-table"><table><thead><tr><th>学员</th><th>手机号</th><th>小组</th><th>备注</th><th>状态</th><th aria-label="操作" /></tr></thead><tbody>{filtered.map((student) => <tr key={student.id}><td><div className="person-cell"><div className="mini-avatar">{student.name.slice(0, 1)}</div><span><strong>{student.name}</strong><small>{student.dharmaName || "未填写法名"}</small></span></div></td><td>{student.phone || "—"}</td><td><span className="soft-badge">{student.groupName || groups.find((g) => g.id === student.groupId)?.name || "待分组"}</span></td><td className="note-cell">{student.note || "—"}</td><td><span className={`state-dot ${student.active === false ? "inactive" : ""}`}>{student.active === false ? "已移出" : "在册"}</span></td><td><div className="row-actions"><button className="icon-button" title="编辑" onClick={() => setEditing(student)}><Pencil size={16} /></button>{student.active !== false && <button className="text-danger" onClick={() => void deactivate(student)}>移出班级</button>}</div></td></tr>)}</tbody></table></div>
+        <div className="mobile-card-list">{filtered.map((student) => <article className="student-card" key={student.id}><div className="person-cell"><div className="mini-avatar large">{student.name.slice(0, 1)}</div><span><strong>{student.name}</strong><small>{student.dharmaName || "未填写法名"}</small></span><span className={`state-dot ${student.active === false ? "inactive" : ""}`}>{student.active === false ? "已移出" : "在册"}</span></div><dl><div><dt>小组</dt><dd>{student.groupName || groups.find((g) => g.id === student.groupId)?.name || "待分组"}</dd></div><div><dt>电话</dt><dd>{student.phone || "—"}</dd></div><div><dt>备注</dt><dd>{student.note || "—"}</dd></div></dl><div className="card-actions"><button className="secondary" onClick={() => setEditing(student)}><Pencil size={15} /> 编辑</button>{student.active !== false && <button className="ghost danger" onClick={() => void deactivate(student)}>移出班级</button>}</div></article>)}</div>
       </>}
     </section>
     {editing && <StudentEditor classId={currentClass.id} student={editing === "new" ? null : editing} groups={groups} onClose={() => setEditing(null)} onSaved={load} />}
@@ -1093,6 +1146,18 @@ function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; cu
     finally { setLoading(false); }
   }
 
+  async function cancelMonitor() {
+    if (!window.confirm(`确定取消“${currentClass.monitorName || "当前班长"}”的班长权限吗？取消后会立即停止访问本班。`)) return;
+    setLoading(true);
+    try {
+      await apiJson(`/api/classes/${currentClass.id}/monitor`, { method: "DELETE" });
+      setMonitorId("");
+      await onRefresh();
+      setNotice({ tone: "success", text: "班长权限已取消，原班长已立即停止访问本班" });
+    } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
+    finally { setLoading(false); }
+  }
+
   async function archiveClass() {
     if (!window.confirm(`确定归档“${currentClass.name}”吗？班长将停止访问，历史数据仍会保留。`)) return;
     setLoading(true);
@@ -1117,7 +1182,7 @@ function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; cu
       <section className="panel form-stack">
         <div className="panel-head"><div><h2>班长账号</h2><p>必须从当前在册学员中选择，每班最多一位班长。</p></div><UserCog size={20} /></div>
         <label>选择班长<select value={monitorId} onChange={(e) => setMonitorId(e.target.value)}><option value="">暂不设置班长</option>{students.filter((s) => s.active !== false).map((s) => <option key={s.id} value={s.id}>{s.name}{s.dharmaName ? `（${s.dharmaName}）` : ""} · {s.groupName}</option>)}</select><small>学员没有账号时，系统会按手机号创建账号并生成临时密码。</small></label>
-        <button type="button" className="primary align-start" onClick={() => void assignMonitor()} disabled={loading}><ShieldCheck size={17} /> 应用班长设置</button>
+        <div className="row-actions align-start"><button type="button" className="primary" onClick={() => void assignMonitor()} disabled={loading}><ShieldCheck size={17} /> 应用班长设置</button>{currentClass.monitorId && <button type="button" className="ghost danger" onClick={() => void cancelMonitor()} disabled={loading}>取消班长权限</button>}</div>
         <div className="permission-note"><strong>班长可以做什么？</strong><span>登记本班三项考勤，查看本班统计；不能查看手机号和备注，也不能维护名单或课表。</span></div>
       </section>
     </div>

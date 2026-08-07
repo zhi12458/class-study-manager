@@ -31,6 +31,11 @@ export interface Counselor {
   displayName: string;
   phone: string;
   active?: boolean;
+  accountActive?: boolean;
+  activeClassCount?: number;
+  archivedClassCount?: number;
+  monitorClassCount?: number;
+  deletable?: boolean;
 }
 
 export interface ClassSummary {

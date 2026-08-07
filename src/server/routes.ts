@@ -111,16 +111,16 @@ function loadUser(db: DatabaseSync) {
   };
 }
 
-function listClasses(db: DatabaseSync, userId: number, isAdmin: boolean) {
-  const where = isAdmin ? "1 = 1" : "(c.counselor_user_id = ? or (m.user_id = ? and c.archived = 0))";
-  const params: SQLInputValue[] = isAdmin ? [] : [userId, userId];
+function listClasses(db: DatabaseSync, userId: number, isAdmin: boolean, canCounsel: boolean) {
+  const where = isAdmin ? "1 = 1" : "(? = 1 and c.counselor_user_id = ?) or (m.user_id = ? and c.archived = 0)";
+  const params: SQLInputValue[] = isAdmin ? [] : [canCounsel ? 1 : 0, userId, userId];
   return db.prepare(
     `select c.id, c.name, c.cadence_mode as cadenceMode, c.archived,
             c.counselor_user_id as counselorId, cu.display_name as counselorName,
             m.enrollment_id as monitorId, mp.name as monitorName,
             (select count(*) from groups g where g.class_id = c.id and g.active = 1) as groupCount,
             (select count(*) from enrollments e where e.class_id = c.id and e.inactive_from_sequence is null) as studentCount,
-            case when c.counselor_user_id = ? then 'counselor' when m.user_id = ? then 'monitor' else 'admin' end as permission
+            case when ? = 1 and c.counselor_user_id = ? then 'counselor' when m.user_id = ? then 'monitor' else 'admin' end as permission
        from classes c
        join users cu on cu.id = c.counselor_user_id
        left join class_monitors m on m.class_id = c.id
@@ -128,7 +128,20 @@ function listClasses(db: DatabaseSync, userId: number, isAdmin: boolean) {
        left join persons mp on mp.id = me.person_id
       where ${where}
       order by c.archived, c.id desc`
-  ).all(userId, userId, ...params);
+  ).all(canCounsel ? 1 : 0, userId, userId, ...params);
+}
+
+function deactivateRolelessUser(db: DatabaseSync, userId: number): void {
+  const user = db.prepare("select is_admin as isAdmin, can_counsel as canCounsel from users where id = ?").get(userId) as
+    | { isAdmin: number; canCounsel: number }
+    | undefined;
+  if (!user || user.isAdmin || user.canCounsel) return;
+  const hasMonitorAccess = db.prepare(
+    "select 1 from class_monitors m join classes c on c.id = m.class_id where m.user_id = ? and c.archived = 0 limit 1"
+  ).get(userId);
+  if (hasMonitorAccess) return;
+  db.prepare("update users set active = 0, updated_at = current_timestamp where id = ?").run(userId);
+  db.prepare("delete from sessions_auth where user_id = ?").run(userId);
 }
 
 function getLesson(db: DatabaseSync, classId: number, lessonId: number) {
@@ -222,9 +235,28 @@ export function createApiRouter(db: DatabaseSync) {
 
   router.get("/admin/counselors", requireAdmin, (_req, res) => {
     const counselors = db.prepare(
-      `select u.id, u.person_id as personId, u.display_name as displayName, p.phone, u.active
-         from users u join persons p on p.id = u.person_id where u.can_counsel = 1 order by u.active desc, u.display_name`
-    ).all().map((row) => ({ ...(row as Record<string, unknown>), active: Boolean((row as Record<string, unknown>).active) }));
+      `select u.id, u.person_id as personId, u.display_name as displayName, p.phone,
+              u.can_counsel as active, u.active as accountActive,
+              (select count(*) from classes c where c.counselor_user_id = u.id and c.archived = 0) as activeClassCount,
+              (select count(*) from classes c where c.counselor_user_id = u.id and c.archived = 1) as archivedClassCount,
+              (select count(*) from class_monitors m join classes c on c.id = m.class_id where m.user_id = u.id and c.archived = 0) as monitorClassCount,
+              case when
+                not exists (select 1 from classes c where c.counselor_user_id = u.id or c.created_by = u.id)
+                and not exists (select 1 from schedule_breaks b where b.created_by = u.id)
+                and not exists (select 1 from attendance_entries a where a.modified_by = u.id)
+                and not exists (select 1 from attendance_audit a where a.modified_by = u.id)
+                and not exists (select 1 from class_monitors m where m.user_id = u.id or m.assigned_by = u.id)
+                and not exists (select 1 from class_counselor_history h where h.counselor_user_id = u.id or h.assigned_by = u.id)
+                and not exists (select 1 from enrollments e where e.person_id = u.person_id)
+              then 1 else 0 end as deletable
+         from users u
+         join persons p on p.id = u.person_id
+        where u.counselor_role = 1
+        order by u.can_counsel desc, u.display_name`
+    ).all().map((row) => {
+      const item = row as Record<string, unknown>;
+      return { ...item, active: Boolean(item.active), accountActive: Boolean(item.accountActive), deletable: Boolean(item.deletable) };
+    });
     res.json({ counselors });
   });
 
@@ -241,18 +273,80 @@ export function createApiRouter(db: DatabaseSync) {
       let userId: number; let temporaryPassword: string | undefined;
       if (existingUser) {
         userId = existingUser.id;
-        db.prepare("update users set can_counsel = 1, active = 1, display_name = ?, username = ?, updated_at = current_timestamp where id = ?")
+        db.prepare("update users set counselor_role = 1, can_counsel = 1, active = 1, display_name = ?, username = ?, updated_at = current_timestamp where id = ?")
           .run(name, phone, userId);
       } else {
         temporaryPassword = generateTemporaryPassword();
         const result = db.prepare(
-          `insert into users (person_id, username, password_hash, display_name, can_counsel, must_change_password)
-           values (?, ?, ?, ?, 1, 1)`
+          `insert into users (person_id, username, password_hash, display_name, counselor_role, can_counsel, must_change_password)
+           values (?, ?, ?, ?, 1, 1, 1)`
         ).run(person.personId, phone, createPasswordHash(temporaryPassword), name);
         userId = Number(result.lastInsertRowid);
       }
       db.exec("commit");
       res.json({ id: userId, temporaryPassword, phone });
+    } catch (error) { db.exec("rollback"); throw error; }
+  });
+
+  router.patch("/admin/counselors/:id", requireAdmin, (req, res) => {
+    const id = numberParam(req.params.id, "辅导员账号 ID");
+    if (typeof req.body.active !== "boolean") return void res.status(400).json({ error: "请指定启用或停用状态" });
+    const counselor = db.prepare(
+      "select id, is_admin as isAdmin from users where id = ? and counselor_role = 1"
+    ).get(id) as { id: number; isAdmin: number } | undefined;
+    if (!counselor || counselor.isAdmin) return void res.status(404).json({ error: "辅导员账号不存在" });
+
+    if (req.body.active) {
+      db.prepare("update users set can_counsel = 1, active = 1, updated_at = current_timestamp where id = ?").run(id);
+      return void res.json({ ok: true, active: true, accountActive: true });
+    }
+
+    const activeClasses = db.prepare(
+      "select id, name from classes where counselor_user_id = ? and archived = 0 order by name"
+    ).all(id) as Array<{ id: number; name: string }>;
+    if (activeClasses.length) {
+      return void res.status(409).json({
+        error: `该辅导员仍负责 ${activeClasses.length} 个未归档班级，请先转交班级后再停用`,
+        classes: activeClasses
+      });
+    }
+    const isMonitor = Boolean(db.prepare(
+      "select 1 from class_monitors m join classes c on c.id = m.class_id where m.user_id = ? and c.archived = 0 limit 1"
+    ).get(id));
+    db.exec("begin immediate");
+    try {
+      db.prepare("update users set can_counsel = 0, active = ?, updated_at = current_timestamp where id = ?").run(isMonitor ? 1 : 0, id);
+      if (!isMonitor) db.prepare("delete from sessions_auth where user_id = ?").run(id);
+      db.exec("commit");
+      res.json({ ok: true, active: false, accountActive: isMonitor });
+    } catch (error) { db.exec("rollback"); throw error; }
+  });
+
+  router.delete("/admin/counselors/:id", requireAdmin, (req, res) => {
+    const id = numberParam(req.params.id, "辅导员账号 ID");
+    const counselor = db.prepare(
+      "select id, person_id as personId, is_admin as isAdmin from users where id = ? and counselor_role = 1"
+    ).get(id) as { id: number; personId: number; isAdmin: number } | undefined;
+    if (!counselor || counselor.isAdmin) return void res.status(404).json({ error: "辅导员账号不存在" });
+    const references = db.prepare(
+      `select
+        (select count(*) from classes c where c.counselor_user_id = ? or c.created_by = ?) +
+        (select count(*) from schedule_breaks b where b.created_by = ?) +
+        (select count(*) from attendance_entries a where a.modified_by = ?) +
+        (select count(*) from attendance_audit a where a.modified_by = ?) +
+        (select count(*) from class_monitors m where m.user_id = ? or m.assigned_by = ?) +
+        (select count(*) from class_counselor_history h where h.counselor_user_id = ? or h.assigned_by = ?) +
+        (select count(*) from enrollments e where e.person_id = ?) as count`
+    ).get(id, id, id, id, id, id, id, id, id, counselor.personId) as { count: number };
+    if (references.count > 0) {
+      return void res.status(409).json({ error: "该账号已有班级、学员或操作历史，只能停用，不能永久删除" });
+    }
+    db.exec("begin immediate");
+    try {
+      db.prepare("delete from users where id = ?").run(id);
+      db.prepare("delete from persons where id = ?").run(counselor.personId);
+      db.exec("commit");
+      res.json({ ok: true });
     } catch (error) { db.exec("rollback"); throw error; }
   });
 
@@ -265,7 +359,7 @@ export function createApiRouter(db: DatabaseSync) {
   });
 
   router.get("/classes", requireAuth, (req: AuthedRequest, res) => {
-    res.json({ classes: listClasses(db, req.user!.id, req.user!.isAdmin) });
+    res.json({ classes: listClasses(db, req.user!.id, req.user!.isAdmin, req.user!.canCounsel) });
   });
 
   router.post("/classes", requireAuth, (req: AuthedRequest, res) => {
@@ -284,7 +378,7 @@ export function createApiRouter(db: DatabaseSync) {
 
   router.get("/classes/:classId", requireAuth, requireClassAccess(db), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId);
-    const item = (listClasses(db, req.user!.id, req.user!.isAdmin) as Array<Record<string, unknown>>).find((row) => Number(row.id) === classId);
+    const item = (listClasses(db, req.user!.id, req.user!.isAdmin, req.user!.canCounsel) as Array<Record<string, unknown>>).find((row) => Number(row.id) === classId);
     if (!item) return void res.status(404).json({ error: "班级不存在" });
     res.json({ class: item, ...item });
   });
@@ -308,7 +402,13 @@ export function createApiRouter(db: DatabaseSync) {
     if (desired !== undefined && (!Number.isInteger(desired) || desired < 1 || desired > 5)) {
       return void res.status(400).json({ error: "小组数必须为1至5" });
     }
-    const classState = db.prepare("select cadence_mode as cadenceMode from classes where id = ?").get(classId) as { cadenceMode: CadenceMode };
+    const classState = db.prepare("select cadence_mode as cadenceMode, counselor_user_id as counselorId from classes where id = ?").get(classId) as { cadenceMode: CadenceMode; counselorId: number };
+    if (req.body.archived === false) {
+      const restoredCounselorId = counselorId ?? classState.counselorId;
+      if (!db.prepare("select 1 from users where id = ? and can_counsel = 1 and active = 1").get(restoredCounselorId)) {
+        return void res.status(400).json({ error: "请先恢复原辅导员账号，或选择另一位正常辅导员后再恢复班级" });
+      }
+    }
     const modeChanged = mode !== undefined && mode !== classState.cadenceMode;
     if (modeChanged) freezeStartedLessons(db, classId);
     db.exec("begin immediate");
@@ -325,7 +425,12 @@ export function createApiRouter(db: DatabaseSync) {
         if (conflict) throw new Error(`无法恢复班级：学员“${conflict.name}”已在“${conflict.otherClassName}”就读`);
       }
       if (name !== undefined) db.prepare("update classes set name = ?, updated_at = current_timestamp where id = ?").run(name, classId);
-      if (counselorId !== undefined) db.prepare("update classes set counselor_user_id = ?, updated_at = current_timestamp where id = ?").run(counselorId, classId);
+      if (counselorId !== undefined && counselorId !== classState.counselorId) {
+        db.prepare("update class_counselor_history set ended_at = current_timestamp where class_id = ? and ended_at is null").run(classId);
+        db.prepare("insert into class_counselor_history (class_id, counselor_user_id, assigned_by) values (?, ?, ?)")
+          .run(classId, counselorId, req.user!.id);
+        db.prepare("update classes set counselor_user_id = ?, updated_at = current_timestamp where id = ?").run(counselorId, classId);
+      }
       if (modeChanged) updateFutureCadence(db, classId, mode, { manageTransaction: false, freezeStarted: false });
       if (req.body.archived !== undefined) {
         db.prepare("update classes set archived = ?, updated_at = current_timestamp where id = ?").run(req.body.archived ? 1 : 0, classId);
@@ -446,10 +551,11 @@ export function createApiRouter(db: DatabaseSync) {
   router.patch("/classes/:classId/students/:studentId", requireAuth, requireClassAccess(db, true), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId); const enrollmentId = numberParam(req.params.studentId, "学员 ID");
     const row = db.prepare(
-      `select e.person_id as personId, e.inactive_from_sequence as inactiveFromSequence, p.phone,
+      `select e.person_id as personId, e.active_from_sequence as activeFromSequence,
+              e.inactive_from_sequence as inactiveFromSequence, p.phone,
               (select id from users where person_id = e.person_id) as userId
          from enrollments e join persons p on p.id = e.person_id where e.id = ? and e.class_id = ?`
-    ).get(enrollmentId, classId) as { personId: number; inactiveFromSequence: number | null; phone: string; userId: number | null } | undefined;
+    ).get(enrollmentId, classId) as { personId: number; activeFromSequence: number; inactiveFromSequence: number | null; phone: string; userId: number | null } | undefined;
     if (!row) return void res.status(404).json({ error: "学员不存在" });
     if (req.body.active === false && row.inactiveFromSequence === null &&
       db.prepare("select 1 from class_monitors where class_id = ? and enrollment_id = ?").get(classId, enrollmentId)) {
@@ -481,8 +587,13 @@ export function createApiRouter(db: DatabaseSync) {
         setEnrollmentGroupFromSequence(db, enrollmentId, groupId, effectiveSequence);
       }
       if (req.body.active === false && row.inactiveFromSequence === null) {
-        db.prepare("update enrollments set inactive_from_sequence = ?, updated_at = current_timestamp where id = ?")
-          .run(effectiveSequence, enrollmentId);
+        const hasHistory = db.prepare("select 1 from lesson_roster where enrollment_id = ? limit 1").get(enrollmentId);
+        if (!hasHistory && effectiveSequence <= row.activeFromSequence) {
+          db.prepare("delete from enrollments where id = ?").run(enrollmentId);
+        } else {
+          db.prepare("update enrollments set inactive_from_sequence = ?, updated_at = current_timestamp where id = ?")
+            .run(Math.max(effectiveSequence, row.activeFromSequence + 1), enrollmentId);
+        }
       }
       db.exec("commit"); res.json({ ok: true, effectiveSequence });
     } catch (error) { db.exec("rollback"); throw error; }
@@ -617,7 +728,9 @@ export function createApiRouter(db: DatabaseSync) {
   router.put("/classes/:classId/monitor", requireAuth, requireClassAccess(db, true), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId);
     if (req.body.studentId == null && req.body.enrollmentId == null) {
+      const current = db.prepare("select user_id as userId from class_monitors where class_id = ?").get(classId) as { userId: number } | undefined;
       db.prepare("delete from class_monitors where class_id = ?").run(classId);
+      if (current) deactivateRolelessUser(db, current.userId);
       return void res.json({ ok: true });
     }
     const classRow = db.prepare("select archived from classes where id = ?").get(classId) as { archived: number };
@@ -630,6 +743,7 @@ export function createApiRouter(db: DatabaseSync) {
     if (!student) return void res.status(400).json({ error: "班长必须从本班在册学员中选择" });
     db.exec("begin immediate");
     try {
+      const previous = db.prepare("select user_id as userId from class_monitors where class_id = ?").get(classId) as { userId: number } | undefined;
       let user = db.prepare("select id from users where person_id = ?").get(student.personId) as { id: number } | undefined;
       let temporaryPassword: string | undefined;
       if (!user) {
@@ -639,6 +753,7 @@ export function createApiRouter(db: DatabaseSync) {
         ).run(student.personId, student.phone, createPasswordHash(temporaryPassword), student.name);
         user = { id: Number(result.lastInsertRowid) };
       }
+      db.prepare("update users set active = 1, updated_at = current_timestamp where id = ?").run(user.id);
       db.prepare(
         "delete from class_monitors where user_id = ? and class_id in (select id from classes where archived = 1)"
       ).run(user.id);
@@ -650,12 +765,17 @@ export function createApiRouter(db: DatabaseSync) {
       db.prepare("delete from class_monitors where class_id = ?").run(classId);
       db.prepare("insert into class_monitors (class_id, enrollment_id, user_id, assigned_by) values (?, ?, ?, ?)")
         .run(classId, enrollmentId, user.id, req.user!.id);
+      if (previous && previous.userId !== user.id) deactivateRolelessUser(db, previous.userId);
       db.exec("commit"); res.json({ ok: true, userId: user.id, temporaryPassword, phone: student.phone });
     } catch (error) { db.exec("rollback"); throw error; }
   });
 
   router.delete("/classes/:classId/monitor", requireAuth, requireClassAccess(db, true), (req, res) => {
-    db.prepare("delete from class_monitors where class_id = ?").run(numberParam(req.params.classId)); res.json({ ok: true });
+    const classId = numberParam(req.params.classId);
+    const current = db.prepare("select user_id as userId from class_monitors where class_id = ?").get(classId) as { userId: number } | undefined;
+    db.prepare("delete from class_monitors where class_id = ?").run(classId);
+    if (current) deactivateRolelessUser(db, current.userId);
+    res.json({ ok: true });
   });
 
   router.post("/classes/:classId/monitor/reset-password", requireAuth, requireClassAccess(db, true), (req, res) => {
