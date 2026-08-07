@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { CadenceMode, LessonScheduleItem, LessonType } from "../../shared/types.js";
-import { courseTitlesForRange } from "../../shared/courseCatalog.js";
+import { coursePlanForRange } from "../../shared/courseCatalog.js";
 import { generateSchedule, insertBreak, shiftScheduleFrom } from "./schedule.js";
 import { freezeStartedLessons } from "./roster.js";
 
@@ -52,9 +52,10 @@ export function createClass(db: DatabaseSync, input: {
     const insertGroup = db.prepare("insert into groups (class_id, name, sort_order) values (?, ?, ?)");
     for (let index = 0; index < input.groupCount; index += 1) insertGroup.run(classId, DEFAULT_GROUP_NAMES[index], index + 1);
     if (input.firstDueDate) {
+      const coursePlan = coursePlanForRange(1, input.lessonCount ?? 24);
       insertLessons(db, classId, generateSchedule({
         firstFinalDueDate: input.firstDueDate, count: input.lessonCount ?? 24, cadenceMode: input.cadenceMode,
-        titles: courseTitlesForRange(1, input.lessonCount ?? 24)
+        ...coursePlan
       }));
     }
     db.exec("commit");
@@ -74,7 +75,7 @@ export function appendLessons(db: DatabaseSync, classId: number, count = 24): nu
   const nextDue = addDays(last.classStudyDueDate, cls.cadenceMode === "parallel_two_week" ? 14 : 7);
   const generated = generateSchedule({
     firstFinalDueDate: nextDue, count, cadenceMode: cls.cadenceMode, startSequence: last.sequence + 1,
-    titles: courseTitlesForRange(last.sequence + 1, count)
+    ...coursePlanForRange(last.sequence + 1, count)
   });
   db.exec("begin immediate");
   try { insertLessons(db, classId, generated); db.exec("commit"); }
@@ -95,7 +96,7 @@ export function setInitialSchedule(
   const cadenceMode = cadenceOverride ?? cls.cadenceMode;
   const generated = generateSchedule({
     firstFinalDueDate: firstDueDate, count, cadenceMode,
-    titles: courseTitlesForRange(1, count)
+    ...coursePlanForRange(1, count)
   });
   db.exec("begin immediate");
   try {

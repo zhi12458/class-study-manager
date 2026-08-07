@@ -1075,7 +1075,7 @@ function GenerateSchedule({ classId, defaultMode, hasLessons, onClose, onSaved }
     } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
     finally { setLoading(false); }
   }
-  return <Modal title={hasLessons ? "追加学习课次" : "生成学习课表"} subtitle={hasLessons ? "从现有最后一课继续，按照班级当前学习模式排期。" : "设置第一课班修截止日；前四课采用旧系统课程名称，其余课次可随后改名。"} onClose={onClose}>
+  return <Modal title={hasLessons ? "追加学习课次" : "生成学习课表"} subtitle={hasLessons ? "从现有最后一课继续，按旧系统课程顺序和当前学习模式排期。" : "设置第一课班修截止日；系统会采用旧版生产系统的课程顺序，并自动识别复习课。"} onClose={onClose}>
     <form className="form-stack" onSubmit={submit}>
       {!hasLessons && <label>第一课班修 / 整课截止日<input type="date" value={firstDueDate} onChange={(e) => setFirstDueDate(e.target.value)} required /></label>}
       <div className="form-grid two"><label>{hasLessons ? "追加课数" : "预排课数"}<input type="number" min={1} max={100} value={count} onChange={(e) => setCount(Number(e.target.value))} required /></label><label>学习模式<select value={cadenceMode} onChange={(e) => setCadenceMode(e.target.value as CadenceMode)} disabled={hasLessons}><option value="same_week">同周完成</option><option value="parallel_two_week">平行两周</option></select>{hasLessons && <small>如需改变学习模式，请先在班级设置中修改。</small>}</label></div>
