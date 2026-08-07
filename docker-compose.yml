@@ -1,0 +1,56 @@
+name: class-study-manager
+
+services:
+  app:
+    build:
+      context: .
+      target: app
+    container_name: class-study-manager
+    init: true
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DB_PATH: /app/data/class-study.sqlite
+      TZ: "${TZ:-Asia/Shanghai}"
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?请先在 .env 中设置 ADMIN_PASSWORD}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+    ports:
+      - "${APP_PORT:-3003}:3000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('node:http').get('http://127.0.0.1:3000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  backup:
+    build:
+      context: .
+      target: backup
+    container_name: class-study-manager-backup
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      DB_PATH: /data/class-study.sqlite
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION_DAYS: "${BACKUP_RETENTION_DAYS:-400}"
+    volumes:
+      - ./data:/data:ro
+      - ./backups:/backups
+    network_mode: none
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true

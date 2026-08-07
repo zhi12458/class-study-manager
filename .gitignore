@@ -1,0 +1,32 @@
+# Dependencies and generated output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Runtime data and private configuration
+.env
+.env.*
+!.env.example
+data/
+backups/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
+# Logs, temporary uploads and local artifacts
+*.log
+npm-debug.log*
+tmp/
+uploads/
+screenshots/
+output/playwright/
+.playwright-cli/
+*.pdf
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
