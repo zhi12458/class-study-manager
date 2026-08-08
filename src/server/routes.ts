@@ -15,7 +15,10 @@ import {
   createPasswordHash, createSession, deleteSession, generateTemporaryPassword,
   listClassAccesses, loadSessionUser, verifyPassword
 } from "./auth.js";
-import { addScheduleBreak, appendLessons, createClass, patchLesson, setInitialSchedule, updateFutureCadence } from "./services/classes.js";
+import {
+  addScheduleBreak, appendLessons, createClass, insertLesson, patchLesson,
+  rebuildFutureSchedule, setInitialSchedule, updateFutureCadence
+} from "./services/classes.js";
 import { classifyRosterRows, parseRosterWorkbook, type ImportRow } from "./services/importRoster.js";
 import { buildClassReport } from "./services/reportBuilder.js";
 import {
@@ -989,7 +992,8 @@ export function createApiRouter(db: DatabaseSync) {
     const lessons = (db.prepare(
       `select id, sequence, sequence as lessonNumber, title, lesson_type as lessonType, cadence_mode as cadenceMode,
               outline_due_date as outlineDueDate, group_study_due_date as groupStudyDueDate,
-              class_study_due_date as classStudyDueDate, roster_frozen_at as frozenAt
+              class_study_due_date as classStudyDueDate, roster_frozen_at as frozenAt,
+              course_position as coursePosition
          from lessons where class_id = ? order by sequence`
     ).all(classId) as Array<Record<string, unknown>>).map((lesson) => {
       const start = addDays(String(lesson.outlineDueDate), -6); const final = String(lesson.classStudyDueDate);
@@ -1021,6 +1025,45 @@ export function createApiRouter(db: DatabaseSync) {
   router.post("/classes/:classId/lessons/append", requireAuth, requireClassAccess(db, true), (req, res) => {
     const classId = numberParam(req.params.classId); const generatedCount = appendLessons(db, classId, Number(req.body.count ?? 24));
     res.json({ generatedCount });
+  });
+
+  router.post("/classes/:classId/schedule/rebuild-future", requireAuth, requireClassAccess(db, true), (req, res) => {
+    const classId = numberParam(req.params.classId);
+    const cadenceMode = String(req.body.cadenceMode ?? "") as CadenceMode;
+    if (!CADENCE_MODES.includes(cadenceMode)) return void res.status(400).json({ error: "学习模式无效" });
+    const seriesKey = String(req.body.seriesKey ?? "").trim();
+    const startPosition = Number(req.body.startPosition);
+    const round = Number(req.body.round ?? 1);
+    const count = Number(req.body.count);
+    if (!/^[a-z0-9_]+$/.test(seriesKey)) return void res.status(400).json({ error: "课程体系无效" });
+    if (!Number.isInteger(startPosition) || startPosition < 1) return void res.status(400).json({ error: "课程起点无效" });
+    if (!Number.isInteger(round) || round < 1 || round > 20) return void res.status(400).json({ error: "学习遍数无效" });
+    const result = rebuildFutureSchedule(db, classId, {
+      firstDueDate: validDate(req.body.firstClassStudyDueDate ?? req.body.firstDueDate),
+      count,
+      cadenceMode,
+      seriesKey,
+      startPosition,
+      round
+    });
+    res.json(result);
+  });
+
+  router.post("/classes/:classId/lessons/insert", requireAuth, requireClassAccess(db, true), (req, res) => {
+    const classId = numberParam(req.params.classId);
+    const lessonType = String(req.body.lessonType ?? "regular");
+    if (!LESSON_TYPES.includes(lessonType as typeof LESSON_TYPES[number])) return void res.status(400).json({ error: "课次类型无效" });
+    const coursePosition = req.body.coursePosition == null || req.body.coursePosition === ""
+      ? null
+      : Number(req.body.coursePosition);
+    const result = insertLesson(db, classId, {
+      beforeLessonId: numberParam(req.body.beforeLessonId, "插入位置"),
+      title: String(req.body.title ?? ""),
+      lessonType: lessonType as typeof LESSON_TYPES[number],
+      classStudyDueDate: validDate(req.body.classStudyDueDate),
+      coursePosition
+    });
+    res.json(result);
   });
 
   router.patch("/classes/:classId/lessons/:lessonId", requireAuth, requireClassAccess(db, true), (req, res) => {

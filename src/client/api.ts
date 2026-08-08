@@ -92,6 +92,7 @@ export interface Student {
 export interface Lesson {
   id: number;
   lessonNumber: number;
+  coursePosition?: number | null;
   title: string;
   lessonType: LessonType;
   cadenceMode: CadenceMode;
