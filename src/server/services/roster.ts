@@ -113,7 +113,7 @@ export function assertPersonAvailableForEnrollment(db: DatabaseSync, personId: n
       where e.person_id = ? and es.status != 'withdrawn' and c.archived = 0 and c.id != ?
       limit 1`
   ).get(personId, targetClassId) as { name: string } | undefined;
-  if (other) throw new Error(`该手机号已作为学员加入“${other.name}”`);
+  if (other) throw new Error(`该学员已作为学员加入“${other.name}”`);
 }
 
 export function setEnrollmentStatusFromSequence(

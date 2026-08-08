@@ -938,7 +938,7 @@ function StudentEditor({ classId, student, groups, isAdmin, onClose, onSaved }: 
   return <Modal title={student ? "编辑学员" : "新增学员"} subtitle="新增和转组从下一课起生效，历史课次不会改变。" onClose={onClose}>
     <form className="form-stack" onSubmit={submit}>
       <div className="form-grid two"><label>姓名<input value={name} onChange={(e) => setName(e.target.value)} required autoFocus /></label><label>法名（选填）<input value={dharmaName} onChange={(e) => setDharmaName(e.target.value)} /></label></div>
-      <label>手机号<input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="tel" placeholder="未写区号时默认 +86" required /></label>
+      <label>手机号（选填）<input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="tel" placeholder="可暂不填写；担任班长或辅导员前必须补充" /><small>普通学员可以留空；手机号填写后仍需保持全系统唯一。</small></label>
       {isAdmin && student && <label>管理员当前密码（修改登录手机号时必填）<input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} autoComplete="current-password" placeholder="普通学员或手机号不变时可以留空" /><small>如果该学员同时是班长或辅导员，修改手机号会同步改变其登录账号。</small></label>}
       <label>所在小组<select value={groupId} onChange={(e) => setGroupId(e.target.value)} required>{groups.filter((g) => g.active !== false).map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
       <label>学员状态<select value={status} onChange={(e) => setStatus(e.target.value as EnrollmentStatus)}><option value="normal">正常（参与完成率统计）</option><option value="leave">休学（暂不统计）</option><option value="withdrawn">退学（不再统计）</option></select><small>状态从下一课起生效，已开始课次和历史完成率不会改变。</small></label>
@@ -987,7 +987,7 @@ function ImportStudents({ classId, onClose, onCommitted }: { classId: number; on
   }
 
   const conflicts = preview?.rows.filter((row) => row.action === "conflict").length ?? 0;
-  return <Modal title="从 Excel 导入学员" subtitle="模板列：姓名、法名、电话、小组、状态、身份、备注。提交前可先核对变化。" onClose={onClose} wide>
+  return <Modal title="从 Excel 导入学员" subtitle="模板列：姓名、法名、电话（可空）、小组、状态、身份、备注。提交前可先核对变化。" onClose={onClose} wide>
     <div className="form-stack">
       {!preview ? <>
         <div className="template-download"><div><strong>还没有模板？</strong><span>模板包含状态和可多选身份；班长仍需在班级设置中任命。</span></div><a className="secondary button" href={`/api/classes/${classId}/import/template.xlsx`} download><Download size={16} /> 下载模板</a></div>
@@ -1001,7 +1001,7 @@ function ImportStudents({ classId, onClose, onCommitted }: { classId: number; on
         <div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>取消</button><button type="button" className="primary" onClick={() => void previewFile()} disabled={!file || loading}>{loading ? "解析中..." : "预览导入"}</button></div>
       </> : <>
         <div className="import-summary"><span className="create">新增 {preview.rows.filter((r) => r.action === "create").length}</span><span className="update">更新 {preview.rows.filter((r) => r.action === "update").length}</span><span>重复 / 不变 {preview.rows.filter((r) => r.action === "skip").length}</span><span className="conflict">冲突 {conflicts}</span></div>
-        <div className="table-wrap compact-table"><table><thead><tr><th>行</th><th>姓名</th><th>电话</th><th>小组</th><th>状态</th><th>身份</th><th>处理</th></tr></thead><tbody>{preview.rows.map((row) => <tr key={row.rowNumber} className={row.action === "conflict" ? "row-error" : ""}><td>{row.rowNumber}</td><td>{row.name}</td><td>{row.phone}</td><td>{row.groupName}</td><td>{ENROLLMENT_STATUS_LABELS[row.status]}</td><td>{row.identities.length ? row.identities.map((role) => ENROLLMENT_ROLE_LABELS[role]).join("、") : "学员"}</td><td><span className={`action-badge ${row.action}`}>{row.action === "create" ? "新增" : row.action === "update" ? "更新" : row.action === "skip" ? "跳过" : "冲突"}</span>{row.message && <small className="cell-note">{row.message}</small>}</td></tr>)}</tbody></table></div>
+        <div className="table-wrap compact-table"><table><thead><tr><th>行</th><th>姓名</th><th>电话</th><th>小组</th><th>状态</th><th>身份</th><th>处理</th></tr></thead><tbody>{preview.rows.map((row) => <tr key={row.rowNumber} className={row.action === "conflict" ? "row-error" : ""}><td>{row.rowNumber}</td><td>{row.name}</td><td>{row.phone || "未填写"}</td><td>{row.groupName}</td><td>{ENROLLMENT_STATUS_LABELS[row.status]}</td><td>{row.identities.length ? row.identities.map((role) => ENROLLMENT_ROLE_LABELS[role]).join("、") : "学员"}</td><td><span className={`action-badge ${row.action}`}>{row.action === "create" ? "新增" : row.action === "update" ? "更新" : row.action === "skip" ? "跳过" : "冲突"}</span>{row.message && <small className="cell-note">{row.message}</small>}</td></tr>)}</tbody></table></div>
         <Notice notice={notice} />
         <div className="modal-actions split"><button type="button" className="ghost" onClick={() => setPreview(null)}>重新选择</button><span>{conflicts ? "请先修正文件中的冲突项" : "确认后将一次性写入名单"}</span><button type="button" className="primary" onClick={() => void commit()} disabled={conflicts > 0 || loading}>{loading ? "导入中..." : "确认导入"}</button></div>
       </>}
@@ -1317,7 +1317,7 @@ function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; cu
       </form>
       <section className="panel form-stack">
         <div className="panel-head"><div><h2>班长账号</h2><p>必须从当前在册学员中选择，每班最多一位班长。</p></div><UserCog size={20} /></div>
-        <label>选择班长<select value={monitorId} onChange={(e) => setMonitorId(e.target.value)}><option value="">暂不设置班长</option>{students.filter((s) => s.active !== false).map((s) => <option key={s.id} value={s.id}>{s.name}{s.dharmaName ? `（${s.dharmaName}）` : ""} · {s.groupName}</option>)}</select><small>学员没有账号时，系统会按手机号创建账号并生成临时密码。</small></label>
+        <label>选择班长<select value={monitorId} onChange={(e) => setMonitorId(e.target.value)}><option value="">暂不设置班长</option>{students.filter((s) => s.active !== false).map((s) => <option key={s.id} value={s.id} disabled={!s.phone}>{s.name}{s.dharmaName ? `（${s.dharmaName}）` : ""} · {s.groupName}{s.phone ? "" : " · 请先补手机号"}</option>)}</select><small>只有已填写手机号的正常学员可以担任班长；没有账号时系统会生成临时密码。</small></label>
         <div className="row-actions align-start"><button type="button" className="primary" onClick={() => void assignMonitor()} disabled={loading}><ShieldCheck size={17} /> 应用班长设置</button>{currentClass.monitorId && <button type="button" className="ghost danger" onClick={() => void cancelMonitor()} disabled={loading}>取消班长权限</button>}</div>
         <div className="permission-note"><strong>班长可以做什么？</strong><span>登记本班三项考勤，查看本班统计；不能查看手机号和备注，也不能维护名单或课表。</span></div>
       </section>

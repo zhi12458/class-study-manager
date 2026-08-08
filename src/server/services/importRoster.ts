@@ -8,6 +8,7 @@ export interface ImportRow {
   name: string;
   dharmaName: string | null;
   phone: string;
+  personId?: number;
   groupName: string;
   note: string | null;
   status: EnrollmentStatus;
@@ -99,51 +100,72 @@ export function classifyRosterRows(
       action = "conflict"; message = error instanceof Error ? error.message : "身份无效";
     }
 
-    try { phone = normalizePhone(rawPhone); } catch (error) {
-      action = "conflict";
-      message = error instanceof Error ? error.message : "电话无效";
+    if (rawPhone) {
+      try { phone = normalizePhone(rawPhone); } catch (error) {
+        action = "conflict";
+        message = error instanceof Error ? error.message : "电话无效";
+      }
+    } else {
+      phone = "";
     }
     if (!name) { action = "conflict"; message = "姓名必填"; }
     if (!groups.has(groupName)) { action = "conflict"; message = `找不到小组“${groupName}”`; }
 
+    const identityKey = phone || `姓名:${name.trim().toLocaleLowerCase()}|法名:${(dharmaName ?? "").trim().toLocaleLowerCase()}`;
     const signature = JSON.stringify({ name, dharmaName, phone, groupName, note, status, identities: [...identities].sort() });
     if (action !== "conflict") {
-      const previous = seen.get(phone);
+      const previous = seen.get(identityKey);
       if (previous !== undefined) {
         action = previous === signature ? "skip" : "conflict";
-        message = previous === signature ? "文件中的重复行，提交时会跳过" : "文件中同一手机号的数据不一致";
+        message = previous === signature ? "文件中的重复行，提交时会跳过" :
+          phone ? "文件中同一手机号的数据不一致" : "文件中同一姓名和法名的数据不一致";
       } else {
-        seen.set(phone, signature);
+        seen.set(identityKey, signature);
+      }
+    }
+
+    let person: { id: number; name: string; dharmaName: string | null; phone: string | null } | undefined;
+    if (action !== "conflict" && phone) {
+      person = db.prepare(
+        "select id, name, dharma_name as dharmaName, phone from persons where phone = ?"
+      ).get(phone) as typeof person;
+    } else if (action !== "conflict") {
+      const matches = db.prepare(
+        `select distinct p.id, p.name, p.dharma_name as dharmaName, p.phone
+           from enrollments e join persons p on p.id = e.person_id
+          where e.class_id = ? and lower(trim(p.name)) = lower(trim(?))
+            and lower(trim(coalesce(p.dharma_name, ''))) = lower(trim(?))`
+      ).all(classId, name, dharmaName ?? "") as Array<NonNullable<typeof person>>;
+      if (matches.length > 1) {
+        action = "conflict";
+        message = "本班存在多名同名同法名学员，请补充手机号后再导入";
+      } else {
+        person = matches[0];
       }
     }
 
     if (action !== "conflict" && identities.includes("group_leader")) {
       const previousLeader = groupLeaders.get(groupName);
-      if (previousLeader && previousLeader !== phone) {
+      if (previousLeader && previousLeader !== identityKey) {
         action = "conflict"; message = `文件中“${groupName}”设置了多名组长`;
       } else {
-        groupLeaders.set(groupName, phone);
+        groupLeaders.set(groupName, identityKey);
         const occupied = db.prepare(
-          `select p.phone from enrollment_roles er
+          `select e.person_id as personId from enrollment_roles er
             join enrollments e on e.id = er.enrollment_id
-            join persons p on p.id = e.person_id
             join group_assignments ga on ga.enrollment_id = e.id and ga.effective_to_sequence is null
             join groups g on g.id = ga.group_id
             join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
            where e.class_id = ? and g.name = ? and er.role = 'group_leader'
              and es.status != 'withdrawn' limit 1`
-        ).get(classId, groupName) as { phone: string } | undefined;
-        if (occupied && occupied.phone !== phone) {
+        ).get(classId, groupName) as { personId: number } | undefined;
+        if (occupied && occupied.personId !== person?.id) {
           action = "conflict"; message = `“${groupName}”已有其他组长`;
         }
       }
     }
 
-    if (action === "create") {
-      const person = db.prepare(
-        "select id, name, dharma_name as dharmaName from persons where phone = ?"
-      ).get(phone) as { id: number; name: string; dharmaName: string | null } | undefined;
-      if (person) {
+    if (action === "create" && person) {
         const otherEnrollment = db.prepare(
           `select c.name from enrollments e
             join classes c on c.id = e.class_id
@@ -170,10 +192,9 @@ export function classifyRosterRows(
           action = unchanged ? "skip" : "update";
           if (unchanged) message = "与本班现有资料相同，提交时会跳过";
         }
-      }
     }
 
-    return { rowNumber, name, dharmaName, phone, groupName, note, status, identities, action, message };
+    return { rowNumber, name, dharmaName, phone, personId: person?.id, groupName, note, status, identities, action, message };
   });
 }
 
@@ -186,7 +207,7 @@ export async function parseRosterWorkbook(db: DatabaseSync, classId: number, buf
   const columns = Object.fromEntries(
     Object.entries(HEADER_ALIASES).map(([key, aliases]) => [key, findColumn(headers, aliases) + 1])
   ) as Record<keyof typeof HEADER_ALIASES, number>;
-  if (!columns.name || !columns.phone || !columns.groupName) throw new Error("模板必须包含姓名、电话和小组列");
+  if (!columns.name || !columns.phone || !columns.groupName) throw new Error("模板必须包含姓名、电话和小组列；电话内容可以留空");
 
   const rows: Array<Partial<ImportRow> & { name: string; phone: string; groupName: string }> = [];
   for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber += 1) {

@@ -35,6 +35,7 @@ function runMigrations(db: DatabaseSync): void {
   if (!applied.has(4)) migrationFour(db);
   if (!applied.has(5)) migrationFive(db);
   if (!applied.has(6)) migrationSix(db);
+  if (!applied.has(7)) migrationSeven(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -324,6 +325,38 @@ function migrationSix(db: DatabaseSync): void {
   } catch (error) {
     db.exec("rollback");
     throw error;
+  }
+}
+
+function migrationSeven(db: DatabaseSync): void {
+  db.exec("pragma foreign_keys = OFF");
+  db.exec("begin immediate");
+  try {
+    db.exec(`
+      create table persons_new (
+        id integer primary key autoincrement,
+        name text not null,
+        dharma_name text,
+        phone text,
+        created_at text not null default current_timestamp,
+        updated_at text not null default current_timestamp
+      );
+      insert into persons_new (id, name, dharma_name, phone, created_at, updated_at)
+      select id, name, dharma_name, phone, created_at, updated_at from persons;
+      drop table persons;
+      alter table persons_new rename to persons;
+      create unique index persons_phone_unique
+        on persons(phone) where phone is not null;
+      insert into schema_migrations (version) values (7);
+    `);
+    const foreignKeyIssues = db.prepare("pragma foreign_key_check").all();
+    if (foreignKeyIssues.length) throw new Error("手机号可选迁移后的外键检查失败");
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  } finally {
+    db.exec("pragma foreign_keys = ON");
   }
 }
 

@@ -191,10 +191,34 @@ function getLesson(db: DatabaseSync, classId: number, lessonId: number) {
   ).get(lessonId, classId) as Record<string, unknown> | undefined;
 }
 
-function createOrUpdatePerson(db: DatabaseSync, input: { name: string; dharmaName?: string | null; phone: string }) {
-  const phone = normalizePhone(input.phone);
-  const existing = db.prepare("select id from persons where phone = ?").get(phone) as { id: number } | undefined;
-  const adminContact = db.prepare("select id from users where contact_phone = ?").get(phone);
+function createOrUpdatePerson(db: DatabaseSync, input: {
+  name: string;
+  dharmaName?: string | null;
+  phone?: string | null;
+  personId?: number;
+  preservePhoneWhenBlank?: boolean;
+}) {
+  const rawPhone = String(input.phone ?? "").trim();
+  let phone = rawPhone ? normalizePhone(rawPhone) : null;
+  if (input.personId) {
+    const current = db.prepare(
+      "select p.id, p.phone, (select id from users where person_id = p.id) as userId from persons p where p.id = ?"
+    ).get(input.personId) as
+      | { id: number; phone: string | null; userId: number | null }
+      | undefined;
+    if (!current) throw new Error("学员资料不存在");
+    if (!phone && input.preservePhoneWhenBlank) phone = current.phone;
+    if (phone) assertPhoneAvailable(db, phone, { personId: current.id, userId: current.userId });
+    db.prepare("update persons set name = ?, dharma_name = ?, phone = ?, updated_at = current_timestamp where id = ?")
+      .run(input.name.trim(), input.dharmaName?.trim() || null, phone, current.id);
+    db.prepare("update users set display_name = ?, updated_at = current_timestamp where person_id = ?")
+      .run(input.name.trim(), current.id);
+    return { personId: current.id, phone, existing: true };
+  }
+  const existing = phone
+    ? db.prepare("select id from persons where phone = ?").get(phone) as { id: number } | undefined
+    : undefined;
+  const adminContact = phone ? db.prepare("select id from users where contact_phone = ?").get(phone) : undefined;
   if (adminContact) throw new Error("该手机号已被其他账号使用");
   if (existing) {
     if (input.dharmaName === undefined) {
@@ -736,7 +760,7 @@ export function createApiRouter(db: DatabaseSync) {
     const effectiveSequence = getNextEffectiveSequence(db, classId);
     db.exec("begin immediate");
     try {
-      const person = createOrUpdatePerson(db, { name, dharmaName: req.body.dharmaName, phone: String(req.body.phone ?? "") });
+      const person = createOrUpdatePerson(db, { name, dharmaName: req.body.dharmaName, phone: req.body.phone });
       const id = insertEnrollment(db, {
         classId, personId: person.personId, groupId, note: req.body.note, effectiveSequence,
         status: parseEnrollmentStatus(req.body.status), roles: parseEnrollmentRoles(req.body.identities ?? req.body.roles)
@@ -756,7 +780,7 @@ export function createApiRouter(db: DatabaseSync) {
          join persons p on p.id = e.person_id
          join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
         where e.id = ? and e.class_id = ?`
-    ).get(enrollmentId, classId) as { personId: number; activeFromSequence: number; inactiveFromSequence: number | null; phone: string; userId: number | null; currentStatus: EnrollmentStatus } | undefined;
+    ).get(enrollmentId, classId) as { personId: number; activeFromSequence: number; inactiveFromSequence: number | null; phone: string | null; userId: number | null; currentStatus: EnrollmentStatus } | undefined;
     if (!row) return void res.status(404).json({ error: "学员不存在" });
     const requestedStatus = req.body.status !== undefined
       ? parseEnrollmentStatus(req.body.status, row.currentStatus)
@@ -770,11 +794,13 @@ export function createApiRouter(db: DatabaseSync) {
     try {
       if (req.body.name !== undefined || req.body.dharmaName !== undefined || req.body.phone !== undefined) {
         const current = db.prepare("select name, dharma_name as dharmaName, phone from persons where id = ?").get(row.personId) as Record<string, unknown>;
-        const phone = req.body.phone === undefined ? String(current.phone) : normalizePhone(String(req.body.phone));
+        const rawPhone = req.body.phone === undefined ? current.phone : String(req.body.phone ?? "").trim();
+        const phone = rawPhone ? normalizePhone(String(rawPhone)) : null;
+        if (!phone && row.userId) throw new Error("班长或辅导员账号必须保留手机号");
         if (phone !== row.phone && row.userId && !req.user!.isAdmin) throw new Error("该手机号已绑定登录账号，请联系管理员修改");
         if (phone !== row.phone) {
           if (row.userId) assertCurrentPassword(db, req.user!.id, req.body.currentPassword);
-          assertPhoneAvailable(db, phone, { personId: row.personId, userId: row.userId });
+          if (phone) assertPhoneAvailable(db, phone, { personId: row.personId, userId: row.userId });
         }
         const dharmaName = req.body.dharmaName === undefined
           ? (current.dharmaName == null ? null : String(current.dharmaName))
@@ -783,7 +809,7 @@ export function createApiRouter(db: DatabaseSync) {
         if (!updatedName) throw new Error("姓名必填");
         db.prepare("update persons set name = ?, dharma_name = ?, phone = ?, updated_at = current_timestamp where id = ?")
           .run(updatedName, dharmaName, phone, row.personId);
-        if (row.userId && phone !== row.phone) db.prepare("update users set username = ?, display_name = ?, updated_at = current_timestamp where id = ?")
+        if (row.userId && phone && phone !== row.phone) db.prepare("update users set username = ?, display_name = ?, updated_at = current_timestamp where id = ?")
           .run(phone, updatedName, row.userId);
         else if (row.userId) db.prepare("update users set display_name = ?, updated_at = current_timestamp where id = ?").run(updatedName, row.userId);
       }
@@ -855,10 +881,11 @@ export function createApiRouter(db: DatabaseSync) {
     instructions.columns = [{ width: 24 }, { width: 72 }];
     instructions.addRows([
       ["班级", classRow.name],
-      ["必填列", "姓名、电话、小组"],
-      ["选填列", "法名、状态、身份、备注；状态留空按正常，身份留空按学员"],
+      ["必填列", "姓名、小组（模板须保留电话列，但普通学员的电话内容可以留空）"],
+      ["选填列", "电话、法名、状态、身份、备注；状态留空按正常，身份留空按学员"],
       ["身份填写", "可填写组长、慈善、传灯、文宣，多个身份用顿号分隔；班长请在班级设置中任命。"],
-      ["电话格式", "可填写中国大陆手机号；未写国家区号时默认按 +86 处理。"],
+      ["电话格式", "普通学员可留空；担任班长或辅导员前必须填写。未写国家区号时默认按 +86 处理。"],
+      ["无电话匹配", "再次导入无电话学员时按姓名＋法名匹配；本班有多名同名同法名学员时会提示冲突。"],
       ["可用小组", groups.map((group) => group.name).join("、")],
       ["导入流程", "上传后先预览新增、更新、重复和冲突，确认无冲突后再提交。"]
     ]);
@@ -880,7 +907,7 @@ export function createApiRouter(db: DatabaseSync) {
     try {
       for (const item of rows.filter((row) => row.action !== "skip")) {
         const groupId = groups.get(item.groupName); if (!groupId) throw new Error(`找不到小组“${item.groupName}”`);
-        const person = createOrUpdatePerson(db, item);
+        const person = createOrUpdatePerson(db, { ...item, preservePhoneWhenBlank: true });
         const existing = db.prepare("select id from enrollments where class_id = ? and person_id = ?").get(classId, person.personId) as { id: number } | undefined;
         if (existing) {
           db.prepare("update enrollments set note = ?, updated_at = current_timestamp where id = ?").run(item.note, existing.id);
@@ -969,8 +996,9 @@ export function createApiRouter(db: DatabaseSync) {
          join persons p on p.id = e.person_id
          join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
         where e.id = ? and e.class_id = ? and es.status = 'normal'`
-    ).get(enrollmentId, classId) as { id: number; personId: number; name: string; phone: string } | undefined;
+    ).get(enrollmentId, classId) as { id: number; personId: number; name: string; phone: string | null } | undefined;
     if (!student) return void res.status(400).json({ error: "班长必须从本班在册学员中选择" });
+    if (!student.phone) return void res.status(400).json({ error: "该学员尚未填写手机号，请先补充手机号后再任命班长" });
     db.exec("begin immediate");
     try {
       const previous = db.prepare("select user_id as userId from class_monitors where class_id = ?").get(classId) as { userId: number } | undefined;
