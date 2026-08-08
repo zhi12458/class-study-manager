@@ -47,7 +47,7 @@ function catalogPlan(db: DatabaseSync, seriesKey: string, startPosition: number,
 
 export function createClass(db: DatabaseSync, input: {
   name: string; counselorUserId: number; createdBy: number; groupCount: number;
-  cadenceMode: CadenceMode; firstDueDate?: string; lessonCount?: number;
+  cadenceMode: CadenceMode; firstDueDate?: string; lessonCount?: number; meetingTime?: string | null;
 }): number {
   if (!input.name.trim()) throw new Error("班级名称必填");
   if (!Number.isInteger(input.groupCount) || input.groupCount < 1 || input.groupCount > 5) throw new Error("小组数必须为1至5");
@@ -56,8 +56,8 @@ export function createClass(db: DatabaseSync, input: {
   db.exec("begin immediate");
   try {
     const result = db.prepare(
-      `insert into classes (name, counselor_user_id, cadence_mode, created_by) values (?, ?, ?, ?)`
-    ).run(input.name.trim(), input.counselorUserId, input.cadenceMode, input.createdBy);
+      `insert into classes (name, counselor_user_id, cadence_mode, created_by, meeting_time) values (?, ?, ?, ?, ?)`
+    ).run(input.name.trim(), input.counselorUserId, input.cadenceMode, input.createdBy, input.meetingTime ?? null);
     const classId = Number(result.lastInsertRowid);
     db.prepare(
       "insert into class_counselor_history (class_id, counselor_user_id, assigned_by) values (?, ?, ?)"

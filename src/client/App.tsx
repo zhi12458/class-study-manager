@@ -131,6 +131,11 @@ function classFromRaw(raw: Record<string, unknown>): ClassSummary {
     groupCount: Number(raw.groupCount ?? 0),
     studentCount: Number(raw.studentCount ?? 0),
     cadenceMode: (raw.cadenceMode ?? "same_week") as CadenceMode,
+    meetingTime: raw.meetingTime == null ? null : String(raw.meetingTime),
+    sourceProgress: raw.sourceProgress == null ? null : String(raw.sourceProgress),
+    courseSeriesKey: raw.courseSeriesKey == null ? null : String(raw.courseSeriesKey),
+    courseRound: Number(raw.courseRound ?? 1),
+    courseStartPosition: Number(raw.courseStartPosition ?? 1),
     archived: Boolean(raw.archived),
     deletable: Boolean(raw.deletable),
     permission: (raw.permission ?? "admin") as ClassSummary["permission"]
@@ -551,6 +556,7 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
   const [showCounselorManager, setShowCounselorManager] = useState(false);
   const [editingCounselor, setEditingCounselor] = useState<Counselor | null>(null);
   const [name, setName] = useState("");
+  const [meetingTime, setMeetingTime] = useState("");
   const [groupCount, setGroupCount] = useState(3);
   const [counselorId, setCounselorId] = useState("");
   const [cadenceMode, setCadenceMode] = useState<CadenceMode>("same_week");
@@ -591,11 +597,12 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
     try {
       const result = await apiJson<Record<string, unknown>>("/api/classes", {
         method: "POST",
-        body: JSON.stringify({ name: name.trim(), groupCount, cadenceMode, ...(user.isAdmin ? { counselorId: Number(counselorId) } : {}) })
+        body: JSON.stringify({ name: name.trim(), meetingTime: meetingTime.trim(), groupCount, cadenceMode, ...(user.isAdmin ? { counselorId: Number(counselorId) } : {}) })
       });
       await onRefresh();
       setShowCreate(false);
       setName("");
+      setMeetingTime("");
       setNotice({ tone: "success", text: "班级已创建，默认小组也准备好了" });
       const id = Number(result.id ?? result.classId ?? (result.class as Record<string, unknown> | undefined)?.id);
       if (id) onSelect(id);
@@ -701,6 +708,7 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
               <div className="class-card-body">
                 <div className="card-title-row"><h2>{item.name}</h2><span className="soft-badge">{item.permission === "monitor" ? "班长" : item.permission === "counselor" ? "辅导员" : "管理员"}</span></div>
                 <p>辅导员：{item.counselorName || "待设置"}</p>
+                {item.meetingTime && <p>共修时间：{item.meetingTime}</p>}
                 <div className="class-facts"><span><Users size={15} /> {item.studentCount ?? 0} 位在班学员</span><span><UserCog size={15} /> 班长：{item.monitorName || "未设置"}</span></div>
                 <button className="primary full" onClick={() => enterClass(item.id)}>进入班级 <span aria-hidden>→</span></button>
                 {(user.isAdmin || item.permission === "counselor") && <div className="class-card-actions"><button className="secondary" onClick={() => void setClassStopped(item, !item.archived)} disabled={loading}>{item.archived ? "恢复班级" : "停用班级"}</button>{user.isAdmin && item.deletable && <button className="ghost danger" onClick={() => void deleteClass(item)} disabled={loading}>永久删除</button>}</div>}
@@ -713,6 +721,7 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
       {showCreate && <Modal title="创建新班级" subtitle="创建后会自动生成默认小组，课表可稍后安排。" onClose={() => setShowCreate(false)}>
         <form className="form-stack" onSubmit={createClass}>
           <label>班级名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：菩提 2026 春季班" autoFocus required /></label>
+          <label>固定共修时间（选填）<input value={meetingTime} onChange={(event) => setMeetingTime(event.target.value)} placeholder="例如：每周二 19:00–21:00" /></label>
           <div className="form-grid two">
             <label>小组数量<select value={groupCount} onChange={(event) => setGroupCount(Number(event.target.value))}>{[1, 2, 3, 4, 5].map((count) => <option key={count} value={count}>{count} 个小组</option>)}</select></label>
             <label>学习安排<select value={cadenceMode} onChange={(event) => setCadenceMode(event.target.value as CadenceMode)}><option value="same_week">同周完成（默认）</option><option value="parallel_two_week">平行两周</option></select></label>
@@ -891,7 +900,7 @@ function OverviewPage({ currentClass }: { currentClass: ClassSummary }) {
         <div className="hero-copy">
           <span className="soft-badge blue">{currentLesson ? `第 ${currentLesson.lessonNumber} 课` : "尚未排课"}</span>
           <h2>{currentLesson?.title || "准备好后，从生成课表开始"}</h2>
-          {currentLesson ? <p>班修截止：{currentLesson.classStudyDueDate || "待设置"} · {currentLesson.cadenceMode === "same_week" ? "同周完成" : "平行两周"}</p> : <p>创建课表后，班长就可以按课次登记三项考勤。</p>}
+          {currentLesson ? <p>班修截止：{currentLesson.classStudyDueDate || "待设置"} · {currentLesson.cadenceMode === "same_week" ? "同周完成" : "平行两周"}</p> : <p>{currentClass.sourceProgress ? `原表进度：${currentClass.sourceProgress}。` : "创建课表后，班长就可以按课次登记三项考勤。"}{currentClass.meetingTime ? ` 共修时间：${currentClass.meetingTime}。` : ""}</p>}
           <div className="hero-actions"><button className="primary" onClick={() => go("/attendance")} disabled={!currentLesson}><ClipboardCheck size={17} /> 去登记考勤</button><button className="glass-button" onClick={() => go("/lessons")}><CalendarDays size={17} /> 查看课表</button></div>
         </div>
         <div className="hero-art"><CloudSun size={68} /><span>{activeStudents.length}</span><small>在册学员</small></div>
@@ -1168,14 +1177,14 @@ function LessonEditor({ classId, lesson, onClose, onSaved }: { classId: number; 
 
 type CourseSeriesOption = { key: string; displayName: string; syncedAt?: string | null; items: Array<{ position: number; title: string; lessonType: string }> };
 
-function GenerateSchedule({ classId, defaultMode, hasLessons, canSync, onClose, onSaved }: { classId: number; defaultMode: CadenceMode; hasLessons: boolean; canSync: boolean; onClose: () => void; onSaved: () => Promise<void> }) {
+function GenerateSchedule({ classId, defaultMode, hasLessons, canSync, defaultSeriesKey, defaultRound, defaultStartPosition, sourceProgress, onClose, onSaved }: { classId: number; defaultMode: CadenceMode; hasLessons: boolean; canSync: boolean; defaultSeriesKey?: string | null; defaultRound?: number; defaultStartPosition?: number; sourceProgress?: string | null; onClose: () => void; onSaved: () => Promise<void> }) {
   const [firstDueDate, setFirstDueDate] = useState("");
   const [count, setCount] = useState(hasLessons ? 24 : 50);
   const [cadenceMode, setCadenceMode] = useState<CadenceMode>(defaultMode);
   const [series, setSeries] = useState<CourseSeriesOption[]>([]);
-  const [seriesKey, setSeriesKey] = useState("wisdom_life");
-  const [startPosition, setStartPosition] = useState(1);
-  const [round, setRound] = useState(1);
+  const [seriesKey, setSeriesKey] = useState(defaultSeriesKey ?? "wisdom_life");
+  const [startPosition, setStartPosition] = useState(defaultStartPosition ?? 1);
+  const [round, setRound] = useState(defaultRound ?? 1);
   const [notice, setNotice] = useState<NoticeState>(null);
   const [loading, setLoading] = useState(false);
   const loadCatalog = useCallback(async () => {
@@ -1210,6 +1219,7 @@ function GenerateSchedule({ classId, defaultMode, hasLessons, canSync, onClose, 
   return <Modal title={hasLessons ? "追加学习课次" : "生成学习课表"} subtitle={hasLessons ? "从现有最后一课继续，自动接着当前课程体系排期。" : "选择课程体系、遍数和起始课；复习课会自动识别。"} onClose={onClose}>
     <form className="form-stack" onSubmit={submit}>
       {!hasLessons && <><div className="form-grid two"><label>课程体系<select value={seriesKey} onChange={(event) => { setSeriesKey(event.target.value); setStartPosition(1); }}>{series.map((entry) => <option value={entry.key} key={entry.key}>{entry.displayName}</option>)}</select></label><label>第几遍<input type="number" min={1} max={20} value={round} onChange={(event) => setRound(Number(event.target.value))} /></label></div>
+      {sourceProgress && <div className="callout"><strong>原表课程进度</strong><span>{sourceProgress}</span></div>}
       <label>从哪一课开始<select value={startPosition} onChange={(event) => setStartPosition(Number(event.target.value))}>{selectedSeries?.items.map((item) => <option key={item.position} value={item.position}>{item.title}</option>)}</select><small>起点之前的课不会生成，也不会进入完成率统计。</small></label>
       {canSync && <div className="template-download"><div><strong>官方课程目录快照</strong><span>只在手工刷新时读取官网，日常排课使用本地快照。</span></div><button type="button" className="secondary" onClick={() => void syncCatalog()} disabled={loading}><RefreshCw size={16} /> 刷新目录</button></div>}</>}
       {!hasLessons && <label>第一课班修 / 整课截止日<input type="date" value={firstDueDate} onChange={(e) => setFirstDueDate(e.target.value)} required /></label>}
@@ -1274,7 +1284,7 @@ function LessonsPage({ currentClass, isAdmin }: { currentClass: ClassSummary; is
       <div className="schedule-legend"><span><i className="dot current" /> 当前 / 近期</span><span><i className="dot future" /> 未开始</span><span><i className="dot review" /> 复习课</span><span><i className="dot break" /> 暂停周</span></div>
       <div className="schedule-list">{timeline.map((entry) => entry.type === "break" ? <article className="schedule-break" key={`break-${entry.breakItem.id}`}><div className="timeline-node"><CloudSun size={17} /></div><div><strong>{entry.breakItem.title}</strong><span>{entry.breakItem.date} · 本周不考勤，后续课表已顺延</span></div></article> : <article className={`schedule-row ${entry.lesson.status ?? (entry.lesson.started ? "finished" : "future")}`} key={entry.lesson.id}><div className="timeline-node">{entry.lesson.lessonNumber}</div><div className="schedule-main"><div><strong>{entry.lesson.title}</strong><span className={`lesson-type ${entry.lesson.lessonType}`}>{entry.lesson.lessonType === "review" ? "复习课" : "普通课"}</span></div><small>{entry.lesson.cadenceMode === "same_week" ? "同周完成" : "平行两周"}</small></div><div className="lesson-dates"><span><small>导图/提纲</small>{entry.lesson.lessonType === "review" ? "不需要" : entry.lesson.outlineDueDate}</span><span><small>组修</small>{entry.lesson.groupStudyDueDate}</span><span><small>班修</small>{entry.lesson.classStudyDueDate}</span></div><button className="icon-button" onClick={() => setEditing(entry.lesson)} disabled={entry.lesson.started} title={entry.lesson.started ? "已开始课次不可改期" : "编辑课次"}><Pencil size={16} /></button></article>)}</div>
     </section>}
-    {showGenerate && <GenerateSchedule classId={currentClass.id} defaultMode={currentClass.cadenceMode ?? "same_week"} hasLessons={lessons.length > 0} canSync={isAdmin} onClose={() => setShowGenerate(false)} onSaved={load} />}
+    {showGenerate && <GenerateSchedule classId={currentClass.id} defaultMode={currentClass.cadenceMode ?? "same_week"} hasLessons={lessons.length > 0} canSync={isAdmin} defaultSeriesKey={currentClass.courseSeriesKey} defaultRound={currentClass.courseRound} defaultStartPosition={currentClass.courseStartPosition} sourceProgress={currentClass.sourceProgress} onClose={() => setShowGenerate(false)} onSaved={load} />}
     {showBreak && <AddBreak classId={currentClass.id} onClose={() => setShowBreak(false)} onSaved={load} />}
     {editing && <LessonEditor classId={currentClass.id} lesson={editing} onClose={() => setEditing(null)} onSaved={load} />}
   </main>;
@@ -1283,6 +1293,8 @@ function LessonsPage({ currentClass, isAdmin }: { currentClass: ClassSummary; is
 function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; currentClass: ClassSummary; onRefresh: () => Promise<void> }) {
   const { go } = useNavigation();
   const [name, setName] = useState(currentClass.name);
+  const [meetingTime, setMeetingTime] = useState(currentClass.meetingTime ?? "");
+  const [sourceProgress, setSourceProgress] = useState(currentClass.sourceProgress ?? "");
   const [cadenceMode, setCadenceMode] = useState<CadenceMode>(currentClass.cadenceMode ?? "same_week");
   const [counselorId, setCounselorId] = useState(String(currentClass.counselorId ?? ""));
   const [monitorId, setMonitorId] = useState(String(currentClass.monitorId ?? ""));
@@ -1293,7 +1305,7 @@ function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; cu
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    setName(currentClass.name); setCadenceMode(currentClass.cadenceMode ?? "same_week"); setCounselorId(String(currentClass.counselorId ?? "")); setMonitorId(String(currentClass.monitorId ?? ""));
+    setName(currentClass.name); setMeetingTime(currentClass.meetingTime ?? ""); setSourceProgress(currentClass.sourceProgress ?? ""); setCadenceMode(currentClass.cadenceMode ?? "same_week"); setCounselorId(String(currentClass.counselorId ?? "")); setMonitorId(String(currentClass.monitorId ?? ""));
     void Promise.all([
       apiJson<unknown>(`/api/classes/${currentClass.id}/students`).then((data) => setStudents(asList<Record<string, unknown>>(data, "students", "items").map(studentFromRaw))),
       user.isAdmin ? apiJson<unknown>("/api/admin/counselors").then((data) => setCounselors(asList<Record<string, unknown>>(data, "counselors", "items").map((raw) => ({ id: Number(raw.id ?? raw.accountId), displayName: String(raw.displayName ?? raw.name), phone: raw.phone == null ? null : String(raw.phone), username: raw.username == null ? null : String(raw.username), active: raw.active == null ? true : Boolean(raw.active) })))) : Promise.resolve()
@@ -1303,7 +1315,7 @@ function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; cu
   async function saveClass(event: FormEvent) {
     event.preventDefault(); setLoading(true);
     try {
-      await apiJson(`/api/classes/${currentClass.id}`, { method: "PATCH", body: JSON.stringify({ name: name.trim(), cadenceMode, ...(user.isAdmin ? { counselorId: Number(counselorId) } : {}) }) });
+      await apiJson(`/api/classes/${currentClass.id}`, { method: "PATCH", body: JSON.stringify({ name: name.trim(), meetingTime: meetingTime.trim(), sourceProgress: sourceProgress.trim(), cadenceMode, ...(user.isAdmin ? { counselorId: Number(counselorId) } : {}) }) });
       await onRefresh(); setNotice({ tone: "success", text: "班级设置已保存；学习模式从下一课起生效" });
     } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
     finally { setLoading(false); }
@@ -1363,6 +1375,8 @@ function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; cu
       <form className="panel form-stack" onSubmit={saveClass}>
         <div className="panel-head"><div><h2>基本信息</h2><p>名称修改后会立即显示在所有人的班级切换器中。</p></div><Settings size={20} /></div>
         <label>班级名称<input value={name} onChange={(e) => setName(e.target.value)} required /></label>
+        <label>固定共修时间（选填）<input value={meetingTime} onChange={(e) => setMeetingTime(e.target.value)} placeholder="例如：每周二 19:00–21:00" /></label>
+        <label>导入课程进度备注（选填）<input value={sourceProgress} onChange={(e) => setSourceProgress(e.target.value)} placeholder="用于提醒辅导员选择准确起始课" /></label>
         <label>下一课起的学习模式<select value={cadenceMode} onChange={(e) => setCadenceMode(e.target.value as CadenceMode)}><option value="same_week">同周完成（默认）</option><option value="parallel_two_week">平行两周</option></select></label>
         {user.isAdmin && <label>班级辅导员<select value={counselorId} onChange={(e) => setCounselorId(e.target.value)} required><option value="">请选择辅导员</option>{counselors.filter((c) => c.active !== false).map((c) => <option key={c.id} value={c.id}>{c.displayName} · {c.phone || c.username}</option>)}</select><small>更换后，原辅导员立即失去本班权限。</small></label>}
         <button className="primary align-start" disabled={loading}><Save size={17} /> 保存基本设置</button>

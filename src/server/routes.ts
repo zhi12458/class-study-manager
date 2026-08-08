@@ -164,6 +164,9 @@ function listClasses(db: DatabaseSync, userId: number, isAdmin: boolean, canCoun
   const params: SQLInputValue[] = isAdmin ? [] : [canCounsel ? 1 : 0, userId, userId];
   return db.prepare(
     `select c.id, c.name, c.cadence_mode as cadenceMode, c.archived,
+            c.meeting_time as meetingTime, c.source_progress as sourceProgress,
+            c.course_series_key as courseSeriesKey, c.course_round as courseRound,
+            c.course_start_position as courseStartPosition,
             c.counselor_user_id as counselorId, cu.display_name as counselorName,
             m.enrollment_id as monitorId, coalesce(nullif(trim(mp.name), ''), mp.dharma_name) as monitorName,
             (select count(*) from groups g where g.class_id = c.id and g.active = 1) as groupCount,
@@ -595,6 +598,7 @@ export function createApiRouter(db: DatabaseSync) {
     const id = createClass(db, {
       name: String(req.body.name ?? ""), counselorUserId, createdBy: req.user!.id,
       groupCount: Number(req.body.groupCount ?? 3), cadenceMode,
+      meetingTime: String(req.body.meetingTime ?? "").trim() || null,
       firstDueDate: req.body.firstDueDate ? validDate(req.body.firstDueDate) : undefined,
       lessonCount: req.body.lessonCount ? Number(req.body.lessonCount) : 50
     });
@@ -623,6 +627,8 @@ export function createApiRouter(db: DatabaseSync) {
     if (req.body.archived !== undefined && typeof req.body.archived !== "boolean") {
       return void res.status(400).json({ error: "归档状态无效" });
     }
+    const meetingTime = req.body.meetingTime === undefined ? undefined : String(req.body.meetingTime).trim() || null;
+    const sourceProgress = req.body.sourceProgress === undefined ? undefined : String(req.body.sourceProgress).trim() || null;
     const desired = req.body.groupCount === undefined ? undefined : Number(req.body.groupCount);
     if (desired !== undefined && (!Number.isInteger(desired) || desired < 1 || desired > 5)) {
       return void res.status(400).json({ error: "小组数必须为1至5" });
@@ -652,6 +658,8 @@ export function createApiRouter(db: DatabaseSync) {
         if (conflict) throw new Error(`无法恢复班级：学员“${conflict.name}”已在“${conflict.otherClassName}”就读`);
       }
       if (name !== undefined) db.prepare("update classes set name = ?, updated_at = current_timestamp where id = ?").run(name, classId);
+      if (meetingTime !== undefined) db.prepare("update classes set meeting_time = ?, updated_at = current_timestamp where id = ?").run(meetingTime, classId);
+      if (sourceProgress !== undefined) db.prepare("update classes set source_progress = ?, updated_at = current_timestamp where id = ?").run(sourceProgress, classId);
       if (counselorId !== undefined && counselorId !== classState.counselorId) {
         db.prepare("update class_counselor_history set ended_at = current_timestamp where class_id = ? and ended_at is null").run(classId);
         db.prepare("insert into class_counselor_history (class_id, counselor_user_id, assigned_by) values (?, ?, ?)")

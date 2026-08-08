@@ -37,6 +37,7 @@ function runMigrations(db: DatabaseSync): void {
   if (!applied.has(6)) migrationSix(db);
   if (!applied.has(7)) migrationSeven(db);
   if (!applied.has(8)) migrationEight(db);
+  if (!applied.has(9)) migrationNine(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -397,6 +398,30 @@ function migrationEight(db: DatabaseSync): void {
     );
     WISDOM_LIFE_COURSES.forEach((course, index) => insert.run(index + 1, course.title, course.lessonType));
     db.prepare("insert into schema_migrations (version) values (8)").run();
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function migrationNine(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    db.exec(`
+      alter table classes add column meeting_time text;
+      alter table classes add column source_progress text;
+
+      create table data_import_runs (
+        id integer primary key autoincrement,
+        source_label text not null,
+        source_sha256 text not null unique,
+        summary_json text not null,
+        imported_by integer not null references users(id),
+        imported_at text not null default current_timestamp
+      );
+      insert into schema_migrations (version) values (9);
+    `);
     db.exec("commit");
   } catch (error) {
     db.exec("rollback");

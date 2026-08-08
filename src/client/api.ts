@@ -55,6 +55,11 @@ export interface ClassSummary {
   groupCount?: number;
   studentCount?: number;
   cadenceMode?: CadenceMode;
+  meetingTime?: string | null;
+  sourceProgress?: string | null;
+  courseSeriesKey?: string | null;
+  courseRound?: number;
+  courseStartPosition?: number;
   archived?: boolean;
   deletable?: boolean;
   permission?: ClassPermission | "admin";
