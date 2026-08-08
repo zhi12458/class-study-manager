@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createPasswordHash } from "./auth.js";
-import { DEFAULT_COURSES } from "../shared/courseCatalog.js";
+import { DEFAULT_COURSES, WISDOM_LIFE_COURSES } from "../shared/courseCatalog.js";
 
 export function getDefaultDbPath(): string {
   return process.env.DB_PATH ?? path.join(process.cwd(), "data", "class-study.sqlite");
@@ -36,6 +36,7 @@ function runMigrations(db: DatabaseSync): void {
   if (!applied.has(5)) migrationFive(db);
   if (!applied.has(6)) migrationSix(db);
   if (!applied.has(7)) migrationSeven(db);
+  if (!applied.has(8)) migrationEight(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -357,6 +358,49 @@ function migrationSeven(db: DatabaseSync): void {
     throw error;
   } finally {
     db.exec("pragma foreign_keys = ON");
+  }
+}
+
+function migrationEight(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    db.exec(`
+      alter table classes add column course_series_key text;
+      alter table classes add column course_round integer not null default 1 check(course_round >= 1);
+      alter table classes add column course_start_position integer not null default 1 check(course_start_position >= 1);
+      alter table lessons add column course_position integer;
+
+      create table course_catalog_series (
+        key text primary key,
+        display_name text not null,
+        source_name text,
+        sort_order integer not null default 0,
+        synced_at text
+      );
+      create table course_catalog_items (
+        series_key text not null references course_catalog_series(key) on delete cascade,
+        position integer not null,
+        source_id integer,
+        title text not null,
+        lesson_type text not null check(lesson_type in ('regular', 'review')),
+        primary key(series_key, position)
+      );
+      create unique index course_catalog_source_unique
+        on course_catalog_items(source_id) where source_id is not null;
+    `);
+    db.prepare(
+      `insert into course_catalog_series (key, display_name, source_name, sort_order)
+       values ('wisdom_life', '智慧人生', '学士课程', 1)`
+    ).run();
+    const insert = db.prepare(
+      "insert into course_catalog_items (series_key, position, title, lesson_type) values ('wisdom_life', ?, ?, ?)"
+    );
+    WISDOM_LIFE_COURSES.forEach((course, index) => insert.run(index + 1, course.title, course.lessonType));
+    db.prepare("insert into schema_migrations (version) values (8)").run();
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
   }
 }
 

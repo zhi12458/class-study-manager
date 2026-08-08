@@ -24,6 +24,8 @@ screenshots/
 output/playwright/
 .playwright-cli/
 *.pdf
+/*.xlsx
+/scripts/preview-tea-roster.ts
 
 # Editors and operating systems
 .DS_Store

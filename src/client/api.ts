@@ -19,6 +19,7 @@ export interface ClassAccess {
 export interface CurrentUser {
   id: number;
   displayName: string;
+  name?: string | null;
   dharmaName?: string | null;
   phone?: string | null;
   username?: string | null;
@@ -32,8 +33,10 @@ export interface Counselor {
   id: number;
   personId?: number;
   displayName: string;
+  name?: string | null;
   dharmaName?: string | null;
-  phone: string;
+  phone: string | null;
+  username?: string | null;
   active?: boolean;
   accountActive?: boolean;
   activeClassCount?: number;
@@ -69,6 +72,7 @@ export interface Student {
   id: number;
   personId?: number;
   name: string;
+  legalName?: string | null;
   dharmaName?: string | null;
   phone?: string | null;
   note?: string | null;
@@ -233,6 +237,7 @@ export function normalizeMe(payload: unknown): CurrentUser {
   return {
     id: Number(raw.id ?? raw.accountId ?? 0),
     displayName: String(raw.displayName ?? raw.name ?? raw.username ?? "用户"),
+    name: raw.name == null ? null : String(raw.name),
     dharmaName: raw.dharmaName == null ? null : String(raw.dharmaName),
     phone: raw.phone == null ? null : String(raw.phone),
     username: raw.username == null ? null : String(raw.username),

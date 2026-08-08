@@ -108,7 +108,7 @@ export function classifyRosterRows(
     } else {
       phone = "";
     }
-    if (!name) { action = "conflict"; message = "姓名必填"; }
+    if (!name && !dharmaName) { action = "conflict"; message = "姓名、法名至少填写一项"; }
     if (!groups.has(groupName)) { action = "conflict"; message = `找不到小组“${groupName}”`; }
 
     const identityKey = phone || `姓名:${name.trim().toLocaleLowerCase()}|法名:${(dharmaName ?? "").trim().toLocaleLowerCase()}`;
@@ -207,18 +207,21 @@ export async function parseRosterWorkbook(db: DatabaseSync, classId: number, buf
   const columns = Object.fromEntries(
     Object.entries(HEADER_ALIASES).map(([key, aliases]) => [key, findColumn(headers, aliases) + 1])
   ) as Record<keyof typeof HEADER_ALIASES, number>;
-  if (!columns.name || !columns.phone || !columns.groupName) throw new Error("模板必须包含姓名、电话和小组列；电话内容可以留空");
+  if ((!columns.name && !columns.dharmaName) || !columns.phone || !columns.groupName) {
+    throw new Error("模板必须包含姓名或法名、电话和小组列；电话内容可以留空");
+  }
 
   const rows: Array<Partial<ImportRow> & { name: string; phone: string; groupName: string }> = [];
   for (let rowNumber = 2; rowNumber <= sheet.rowCount; rowNumber += 1) {
     const row = sheet.getRow(rowNumber);
-    const name = text(row.getCell(columns.name).value);
+    const name = columns.name ? text(row.getCell(columns.name).value) : "";
     const rawPhone = text(row.getCell(columns.phone).value);
     const groupName = text(row.getCell(columns.groupName).value);
-    if (!name && !rawPhone && !groupName) continue;
+    const dharmaName = optionalText(columns.dharmaName ? row.getCell(columns.dharmaName).value : null);
+    if (!name && !dharmaName && !rawPhone && !groupName) continue;
     const cell = (column: number) => column > 0 ? row.getCell(column).value : null;
     rows.push({
-      rowNumber, name, dharmaName: optionalText(cell(columns.dharmaName)),
+      rowNumber, name, dharmaName,
       phone: rawPhone, groupName, note: optionalText(cell(columns.note)),
       status: cell(columns.status) as unknown as EnrollmentStatus,
       identities: cell(columns.identities) as unknown as EnrollmentRole[]

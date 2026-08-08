@@ -37,6 +37,7 @@ export interface AuthUser {
   id: number;
   personId: number | null;
   displayName: string;
+  name: string | null;
   dharmaName: string | null;
   phone: string | null;
   username: string;

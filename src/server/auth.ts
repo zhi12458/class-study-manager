@@ -45,7 +45,7 @@ export function deleteSession(db: DatabaseSync, token?: string): void {
 export function loadSessionUser(db: DatabaseSync, token?: string): AuthUser | null {
   if (!token) return null;
   const row = db.prepare(
-    `select u.id, u.person_id as personId, u.display_name as displayName,
+    `select u.id, u.person_id as personId, u.display_name as displayName, p.name,
             p.dharma_name as dharmaName, coalesce(p.phone, u.contact_phone) as phone,
             u.username, u.is_admin as isAdmin, u.can_counsel as canCounsel,
             u.must_change_password as mustChangePassword
@@ -59,6 +59,7 @@ export function loadSessionUser(db: DatabaseSync, token?: string): AuthUser | nu
     id: Number(row.id),
     personId: row.personId == null ? null : Number(row.personId),
     displayName: String(row.displayName),
+    name: row.name == null ? null : String(row.name),
     dharmaName: row.dharmaName == null ? null : String(row.dharmaName),
     phone: row.phone == null ? null : String(row.phone),
     username: String(row.username),

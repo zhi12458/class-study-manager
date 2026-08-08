@@ -23,6 +23,11 @@ import {
   freezeStartedLessons, lessonStartDate, setEnrollmentGroupFromSequence, setEnrollmentStatusFromSequence, shanghaiToday
 } from "./services/roster.js";
 import { isMonitorLocked } from "./services/schedule.js";
+import { listCourseCatalog, syncOfficialCourseCatalog } from "./services/courseCatalog.js";
+import {
+  assertPersonName, assertUsernameAvailable, normalizeCustomUsername,
+  personDisplayName, suggestUniqueUsername
+} from "./services/accounts.js";
 
 const COOKIE = "class_study_session";
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -144,13 +149,23 @@ function loadAccountProfile(db: DatabaseSync, userId: number) {
   ).get(userId) as Record<string, unknown> | undefined;
 }
 
+function accountUsername(
+  db: DatabaseSync,
+  input: { phone?: string | null; requested?: unknown; displayName: string; userId?: number | null }
+): string {
+  const requested = String(input.requested ?? "").trim();
+  const username = requested ? normalizeCustomUsername(requested) : input.phone || suggestUniqueUsername(db, input.displayName);
+  assertUsernameAvailable(db, username, input.userId);
+  return username;
+}
+
 function listClasses(db: DatabaseSync, userId: number, isAdmin: boolean, canCounsel: boolean) {
   const where = isAdmin ? "1 = 1" : "(? = 1 and c.counselor_user_id = ?) or (m.user_id = ? and c.archived = 0)";
   const params: SQLInputValue[] = isAdmin ? [] : [canCounsel ? 1 : 0, userId, userId];
   return db.prepare(
     `select c.id, c.name, c.cadence_mode as cadenceMode, c.archived,
             c.counselor_user_id as counselorId, cu.display_name as counselorName,
-            m.enrollment_id as monitorId, mp.name as monitorName,
+            m.enrollment_id as monitorId, coalesce(nullif(trim(mp.name), ''), mp.dharma_name) as monitorName,
             (select count(*) from groups g where g.class_id = c.id and g.active = 1) as groupCount,
             (select count(*) from enrollments e join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null where e.class_id = c.id and es.status != 'withdrawn') as studentCount,
             case when not exists (select 1 from enrollments e where e.class_id = c.id)
@@ -198,6 +213,7 @@ function createOrUpdatePerson(db: DatabaseSync, input: {
   personId?: number;
   preservePhoneWhenBlank?: boolean;
 }) {
+  const identity = assertPersonName(input.name, input.dharmaName);
   const rawPhone = String(input.phone ?? "").trim();
   let phone = rawPhone ? normalizePhone(rawPhone) : null;
   if (input.personId) {
@@ -210,9 +226,9 @@ function createOrUpdatePerson(db: DatabaseSync, input: {
     if (!phone && input.preservePhoneWhenBlank) phone = current.phone;
     if (phone) assertPhoneAvailable(db, phone, { personId: current.id, userId: current.userId });
     db.prepare("update persons set name = ?, dharma_name = ?, phone = ?, updated_at = current_timestamp where id = ?")
-      .run(input.name.trim(), input.dharmaName?.trim() || null, phone, current.id);
+      .run(identity.name, identity.dharmaName, phone, current.id);
     db.prepare("update users set display_name = ?, updated_at = current_timestamp where person_id = ?")
-      .run(input.name.trim(), current.id);
+      .run(identity.displayName, current.id);
     return { personId: current.id, phone, existing: true };
   }
   const existing = phone
@@ -223,17 +239,17 @@ function createOrUpdatePerson(db: DatabaseSync, input: {
   if (existing) {
     if (input.dharmaName === undefined) {
       db.prepare("update persons set name = ?, updated_at = current_timestamp where id = ?")
-        .run(input.name.trim(), existing.id);
+        .run(identity.name, existing.id);
     } else {
       db.prepare("update persons set name = ?, dharma_name = ?, updated_at = current_timestamp where id = ?")
-        .run(input.name.trim(), input.dharmaName?.trim() || null, existing.id);
+        .run(identity.name, identity.dharmaName, existing.id);
     }
     db.prepare("update users set display_name = ?, updated_at = current_timestamp where person_id = ?")
-      .run(input.name.trim(), existing.id);
+      .run(identity.displayName, existing.id);
     return { personId: existing.id, phone, existing: true };
   }
   const result = db.prepare("insert into persons (name, dharma_name, phone) values (?, ?, ?)")
-    .run(input.name.trim(), input.dharmaName?.trim() || null, phone);
+    .run(identity.name, identity.dharmaName, phone);
   return { personId: Number(result.lastInsertRowid), phone, existing: false };
 }
 
@@ -282,7 +298,7 @@ function updateEnrollmentRoles(
 ): void {
   if (roles.includes("group_leader")) {
     const occupied = db.prepare(
-      `select p.name
+      `select coalesce(nullif(trim(p.name), ''), p.dharma_name) as name
          from enrollment_roles er
          join enrollments e on e.id = er.enrollment_id
          join persons p on p.id = e.person_id
@@ -305,6 +321,15 @@ export function createApiRouter(db: DatabaseSync) {
   router.use(loadUser(db));
 
   router.get("/health", (_req, res) => res.json({ ok: true, service: "class-study-manager" }));
+
+  router.get("/course-catalog", requireAuth, (_req, res) => {
+    res.json({ series: listCourseCatalog(db) });
+  });
+
+  router.post("/admin/course-catalog/sync", requireAdmin, async (_req, res) => {
+    const series = await syncOfficialCourseCatalog(db);
+    res.json({ seriesCount: series.length, itemCount: series.reduce((sum, item) => sum + item.items.length, 0) });
+  });
 
   router.post("/auth/login", (req, res) => {
     const identifier = String(req.body.identifier ?? req.body.username ?? req.body.phone ?? "").trim();
@@ -336,32 +361,45 @@ export function createApiRouter(db: DatabaseSync) {
   router.patch("/auth/profile", requireAuth, (req: AuthedRequest, res) => {
     const profile = loadAccountProfile(db, req.user!.id);
     if (!profile) return void res.status(404).json({ error: "账号不存在" });
-    const name = String(req.body.displayName ?? req.body.name ?? profile.displayName ?? "").trim();
-    if (!name) return void res.status(400).json({ error: "姓名必填" });
     const isAdmin = Boolean(profile.isAdmin);
     const personId = profile.personId == null ? null : Number(profile.personId);
     if (!isAdmin && !personId) return void res.status(400).json({ error: "账号尚未关联人员资料" });
+    const identity = isAdmin
+      ? { name: String(req.body.displayName ?? req.body.name ?? profile.displayName ?? "").trim(), dharmaName: null, displayName: String(req.body.displayName ?? req.body.name ?? profile.displayName ?? "").trim() }
+      : assertPersonName(
+          req.body.name ?? profile.name,
+          req.body.dharmaName ?? profile.dharmaName
+        );
+    if (!identity.displayName) return void res.status(400).json({ error: "显示姓名必填" });
     const currentPhone = profile.phone == null ? null : String(profile.phone);
     const rawPhone = String(req.body.phone ?? currentPhone ?? "").trim();
     const phone = rawPhone ? normalizePhone(rawPhone) : null;
-    if (!isAdmin && !phone) return void res.status(400).json({ error: "手机号必填" });
     const phoneChanged = phone !== currentPhone;
-    if (phoneChanged) {
+    const currentUsername = String(profile.username ?? "");
+    let username = currentUsername;
+    if (!isAdmin) {
+      if (req.body.username !== undefined) {
+        username = accountUsername(db, { phone: null, requested: req.body.username, displayName: identity.displayName, userId: req.user!.id });
+      } else if (currentUsername === currentPhone && phoneChanged) {
+        username = accountUsername(db, { phone, displayName: identity.displayName, userId: req.user!.id });
+      }
+    }
+    const usernameChanged = username !== currentUsername;
+    if (phoneChanged || usernameChanged) {
       assertCurrentPassword(db, req.user!.id, req.body.currentPassword);
       if (phone) assertPhoneAvailable(db, phone, { personId, userId: req.user!.id });
     }
-    const dharmaName = isAdmin ? null : String(req.body.dharmaName ?? profile.dharmaName ?? "").trim() || null;
 
     db.exec("begin immediate");
     try {
       if (isAdmin) {
         db.prepare("update users set display_name = ?, contact_phone = ?, updated_at = current_timestamp where id = ?")
-          .run(name, phone, req.user!.id);
+          .run(identity.displayName, phone, req.user!.id);
       } else {
         db.prepare("update persons set name = ?, dharma_name = ?, phone = ?, updated_at = current_timestamp where id = ?")
-          .run(name, dharmaName, phone, personId);
+          .run(identity.name, identity.dharmaName, phone, personId);
         db.prepare("update users set display_name = ?, username = ?, updated_at = current_timestamp where id = ?")
-          .run(name, phone, req.user!.id);
+          .run(identity.displayName, username, req.user!.id);
       }
       db.exec("commit");
       res.json({ profile: loadAccountProfile(db, req.user!.id) });
@@ -386,7 +424,7 @@ export function createApiRouter(db: DatabaseSync) {
   router.get("/admin/counselors", requireAdmin, (_req, res) => {
     const counselors = db.prepare(
       `select u.id, u.person_id as personId, u.display_name as displayName,
-              p.dharma_name as dharmaName, p.phone,
+              p.name, p.dharma_name as dharmaName, p.phone, u.username,
               u.can_counsel as active, u.active as accountActive,
               (select count(*) from classes c where c.counselor_user_id = u.id and c.archived = 0) as activeClassCount,
               (select count(*) from classes c where c.counselor_user_id = u.id and c.archived = 1) as archivedClassCount,
@@ -412,30 +450,34 @@ export function createApiRouter(db: DatabaseSync) {
   });
 
   router.post("/admin/counselors", requireAdmin, (req: AuthedRequest, res) => {
-    const name = String(req.body.displayName ?? req.body.name ?? "").trim();
-    if (!name) return void res.status(400).json({ error: "姓名必填" });
-    const phone = normalizePhone(String(req.body.phone ?? ""));
+    const identity = assertPersonName(req.body.name ?? req.body.displayName, req.body.dharmaName);
+    const rawPhone = String(req.body.phone ?? "").trim();
+    const phone = rawPhone ? normalizePhone(rawPhone) : null;
     db.exec("begin immediate");
     try {
-      const person = createOrUpdatePerson(db, { name, phone });
-      const existingUser = db.prepare("select id, can_counsel as canCounsel from users where person_id = ?").get(person.personId) as
-        | { id: number; canCounsel: number }
+      const person = createOrUpdatePerson(db, { name: identity.name, dharmaName: identity.dharmaName, phone });
+      const existingUser = db.prepare("select id, username, can_counsel as canCounsel from users where person_id = ?").get(person.personId) as
+        | { id: number; username: string; canCounsel: number }
         | undefined;
-      let userId: number; let temporaryPassword: string | undefined;
+      let userId: number; let temporaryPassword: string | undefined; let username: string;
       if (existingUser) {
         userId = existingUser.id;
+        username = req.body.username === undefined
+          ? existingUser.username
+          : accountUsername(db, { requested: req.body.username, displayName: identity.displayName, userId });
         db.prepare("update users set counselor_role = 1, can_counsel = 1, active = 1, display_name = ?, username = ?, updated_at = current_timestamp where id = ?")
-          .run(name, phone, userId);
+          .run(identity.displayName, username, userId);
       } else {
         temporaryPassword = generateTemporaryPassword();
+        username = accountUsername(db, { phone, requested: req.body.username, displayName: identity.displayName });
         const result = db.prepare(
           `insert into users (person_id, username, password_hash, display_name, counselor_role, can_counsel, must_change_password)
            values (?, ?, ?, ?, 1, 1, 1)`
-        ).run(person.personId, phone, createPasswordHash(temporaryPassword), name);
+        ).run(person.personId, username, createPasswordHash(temporaryPassword), identity.displayName);
         userId = Number(result.lastInsertRowid);
       }
       db.exec("commit");
-      res.json({ id: userId, temporaryPassword, phone });
+      res.json({ id: userId, temporaryPassword, phone, username, loginIdentifier: username });
     } catch (error) { db.exec("rollback"); throw error; }
   });
 
@@ -443,33 +485,37 @@ export function createApiRouter(db: DatabaseSync) {
     const id = numberParam(req.params.id, "辅导员账号 ID");
     const counselor = db.prepare(
       `select u.id, u.is_admin as isAdmin, u.person_id as personId, u.display_name as displayName,
-              p.name, p.dharma_name as dharmaName, p.phone
+              u.username, p.name, p.dharma_name as dharmaName, p.phone
          from users u join persons p on p.id = u.person_id
         where u.id = ? and u.counselor_role = 1`
-    ).get(id) as { id: number; isAdmin: number; personId: number; displayName: string; name: string; dharmaName: string | null; phone: string } | undefined;
+    ).get(id) as { id: number; isAdmin: number; personId: number; displayName: string; username: string; name: string; dharmaName: string | null; phone: string | null } | undefined;
     if (!counselor || counselor.isAdmin) return void res.status(404).json({ error: "辅导员账号不存在" });
 
     const editsProfile = req.body.displayName !== undefined || req.body.name !== undefined ||
-      req.body.dharmaName !== undefined || req.body.phone !== undefined;
+      req.body.dharmaName !== undefined || req.body.phone !== undefined || req.body.username !== undefined;
     if (editsProfile) {
-      const name = String(req.body.displayName ?? req.body.name ?? counselor.name).trim();
-      if (!name) return void res.status(400).json({ error: "姓名必填" });
-      const dharmaName = req.body.dharmaName === undefined
-        ? counselor.dharmaName
-        : String(req.body.dharmaName ?? "").trim() || null;
-      const phone = req.body.phone === undefined ? counselor.phone : normalizePhone(String(req.body.phone));
-      if (phone !== counselor.phone) {
+      const identity = assertPersonName(req.body.name ?? req.body.displayName ?? counselor.name,
+        req.body.dharmaName === undefined ? counselor.dharmaName : req.body.dharmaName);
+      const rawPhone = req.body.phone === undefined ? counselor.phone : String(req.body.phone ?? "").trim();
+      const phone = rawPhone ? normalizePhone(String(rawPhone)) : null;
+      let username = counselor.username;
+      if (req.body.username !== undefined) {
+        username = accountUsername(db, { requested: req.body.username, displayName: identity.displayName, userId: id });
+      } else if (counselor.username === counselor.phone && phone !== counselor.phone) {
+        username = accountUsername(db, { phone, displayName: identity.displayName, userId: id });
+      }
+      if (phone !== counselor.phone || username !== counselor.username) {
         assertCurrentPassword(db, (req as AuthedRequest).user!.id, req.body.currentPassword);
-        assertPhoneAvailable(db, phone, { personId: counselor.personId, userId: counselor.id });
+        if (phone) assertPhoneAvailable(db, phone, { personId: counselor.personId, userId: counselor.id });
       }
       db.exec("begin immediate");
       try {
         db.prepare("update persons set name = ?, dharma_name = ?, phone = ?, updated_at = current_timestamp where id = ?")
-          .run(name, dharmaName, phone, counselor.personId);
+          .run(identity.name, identity.dharmaName, phone, counselor.personId);
         db.prepare("update users set display_name = ?, username = ?, updated_at = current_timestamp where id = ?")
-          .run(name, phone, counselor.id);
+          .run(identity.displayName, username, counselor.id);
         db.exec("commit");
-        return void res.json({ ok: true, id, displayName: name, dharmaName, phone });
+        return void res.json({ ok: true, id, displayName: identity.displayName, dharmaName: identity.dharmaName, phone, username });
       } catch (error) { db.exec("rollback"); throw error; }
     }
 
@@ -721,7 +767,8 @@ export function createApiRouter(db: DatabaseSync) {
   router.get("/classes/:classId/students", requireAuth, requireClassAccess(db), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId);
     const students = db.prepare(
-      `select e.id, e.id as studentId, e.person_id as personId, p.name, p.dharma_name as dharmaName,
+      `select e.id, e.id as studentId, e.person_id as personId, p.name as legalName,
+              coalesce(nullif(trim(p.name), ''), p.dharma_name) as name, p.dharma_name as dharmaName,
               p.phone, e.note, g.id as groupId, g.name as groupName,
               es.status,
               (select group_concat(er.role) from enrollment_roles er where er.enrollment_id = e.id) as roleCsv,
@@ -754,13 +801,13 @@ export function createApiRouter(db: DatabaseSync) {
 
   router.post("/classes/:classId/students", requireAuth, requireClassAccess(db, true), (req, res) => {
     const classId = numberParam(req.params.classId);
-    const name = String(req.body.name ?? "").trim(); if (!name) return void res.status(400).json({ error: "姓名必填" });
+    const identity = assertPersonName(req.body.name, req.body.dharmaName);
     const groupId = numberParam(req.body.groupId, "小组");
     if (!db.prepare("select 1 from groups where id = ? and class_id = ? and active = 1").get(groupId, classId)) return void res.status(400).json({ error: "小组无效" });
     const effectiveSequence = getNextEffectiveSequence(db, classId);
     db.exec("begin immediate");
     try {
-      const person = createOrUpdatePerson(db, { name, dharmaName: req.body.dharmaName, phone: req.body.phone });
+      const person = createOrUpdatePerson(db, { name: identity.name, dharmaName: identity.dharmaName, phone: req.body.phone });
       const id = insertEnrollment(db, {
         classId, personId: person.personId, groupId, note: req.body.note, effectiveSequence,
         status: parseEnrollmentStatus(req.body.status), roles: parseEnrollmentRoles(req.body.identities ?? req.body.roles)
@@ -796,7 +843,6 @@ export function createApiRouter(db: DatabaseSync) {
         const current = db.prepare("select name, dharma_name as dharmaName, phone from persons where id = ?").get(row.personId) as Record<string, unknown>;
         const rawPhone = req.body.phone === undefined ? current.phone : String(req.body.phone ?? "").trim();
         const phone = rawPhone ? normalizePhone(String(rawPhone)) : null;
-        if (!phone && row.userId) throw new Error("班长或辅导员账号必须保留手机号");
         if (phone !== row.phone && row.userId && !req.user!.isAdmin) throw new Error("该手机号已绑定登录账号，请联系管理员修改");
         if (phone !== row.phone) {
           if (row.userId) assertCurrentPassword(db, req.user!.id, req.body.currentPassword);
@@ -805,13 +851,17 @@ export function createApiRouter(db: DatabaseSync) {
         const dharmaName = req.body.dharmaName === undefined
           ? (current.dharmaName == null ? null : String(current.dharmaName))
           : String(req.body.dharmaName || "").trim() || null;
-        const updatedName = String(req.body.name ?? current.name).trim();
-        if (!updatedName) throw new Error("姓名必填");
+        const identity = assertPersonName(req.body.name ?? current.name, dharmaName);
         db.prepare("update persons set name = ?, dharma_name = ?, phone = ?, updated_at = current_timestamp where id = ?")
-          .run(updatedName, dharmaName, phone, row.personId);
-        if (row.userId && phone && phone !== row.phone) db.prepare("update users set username = ?, display_name = ?, updated_at = current_timestamp where id = ?")
-          .run(phone, updatedName, row.userId);
-        else if (row.userId) db.prepare("update users set display_name = ?, updated_at = current_timestamp where id = ?").run(updatedName, row.userId);
+          .run(identity.name, identity.dharmaName, phone, row.personId);
+        if (row.userId) {
+          const account = db.prepare("select username from users where id = ?").get(row.userId) as { username: string };
+          const username = account.username === row.phone && phone !== row.phone
+            ? accountUsername(db, { phone, requested: req.body.username, displayName: identity.displayName, userId: row.userId })
+            : account.username;
+          db.prepare("update users set username = ?, display_name = ?, updated_at = current_timestamp where id = ?")
+            .run(username, identity.displayName, row.userId);
+        }
       }
       if (req.body.note !== undefined) db.prepare("update enrollments set note = ?, updated_at = current_timestamp where id = ?")
         .run(String(req.body.note || "").trim() || null, enrollmentId);
@@ -881,10 +931,10 @@ export function createApiRouter(db: DatabaseSync) {
     instructions.columns = [{ width: 24 }, { width: 72 }];
     instructions.addRows([
       ["班级", classRow.name],
-      ["必填列", "姓名、小组（模板须保留电话列，但普通学员的电话内容可以留空）"],
-      ["选填列", "电话、法名、状态、身份、备注；状态留空按正常，身份留空按学员"],
+      ["必填列", "姓名或法名至少填写一项、小组（模板须保留电话列，但普通学员的电话内容可以留空）"],
+      ["选填列", "电话、状态、身份、备注；状态留空按正常，身份留空按学员"],
       ["身份填写", "可填写组长、慈善、传灯、文宣，多个身份用顿号分隔；班长请在班级设置中任命。"],
-      ["电话格式", "普通学员可留空；担任班长或辅导员前必须填写。未写国家区号时默认按 +86 处理。"],
+      ["电话格式", "普通学员可留空；无手机号的班长或辅导员可使用拼音账号登录。未写国家区号时默认按 +86 处理。"],
       ["无电话匹配", "再次导入无电话学员时按姓名＋法名匹配；本班有多名同名同法名学员时会提示冲突。"],
       ["可用小组", groups.map((group) => group.name).join("、")],
       ["导入流程", "上传后先预览新增、更新、重复和冲突，确认无冲突后再提交。"]
@@ -947,8 +997,17 @@ export function createApiRouter(db: DatabaseSync) {
     const firstDueDate = req.body.firstDueDate ?? req.body.firstClassStudyDueDate;
     const cadenceMode = req.body.cadenceMode === undefined ? undefined : String(req.body.cadenceMode) as CadenceMode;
     if (cadenceMode !== undefined && !CADENCE_MODES.includes(cadenceMode)) return void res.status(400).json({ error: "学习模式无效" });
-    setInitialSchedule(db, classId, validDate(firstDueDate), Number(req.body.count ?? 50), cadenceMode);
-    res.json({ generatedCount: Number(req.body.count ?? 50) });
+    const seriesKey = String(req.body.seriesKey ?? "wisdom_life").trim();
+    const startPosition = Number(req.body.startPosition ?? 1);
+    const round = Number(req.body.round ?? 1);
+    if (!/^[a-z0-9_]+$/.test(seriesKey)) return void res.status(400).json({ error: "课程体系无效" });
+    if (!Number.isInteger(startPosition) || startPosition < 1) return void res.status(400).json({ error: "课程起点无效" });
+    if (!Number.isInteger(round) || round < 1 || round > 20) return void res.status(400).json({ error: "学习遍数无效" });
+    const generatedCount = setInitialSchedule(
+      db, classId, validDate(firstDueDate), Number(req.body.count ?? 50), cadenceMode,
+      { seriesKey, startPosition, round }
+    );
+    res.json({ generatedCount });
   });
 
   router.post("/classes/:classId/lessons/append", requireAuth, requireClassAccess(db, true), (req, res) => {
@@ -991,25 +1050,28 @@ export function createApiRouter(db: DatabaseSync) {
     if (classRow.archived) return void res.status(400).json({ error: "已归档班级不能设置班长" });
     const enrollmentId = numberParam(req.body.studentId ?? req.body.enrollmentId, "学员");
     const student = db.prepare(
-      `select e.id, e.person_id as personId, p.name, p.phone
+      `select e.id, e.person_id as personId, p.name, p.dharma_name as dharmaName, p.phone
          from enrollments e
          join persons p on p.id = e.person_id
          join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
         where e.id = ? and e.class_id = ? and es.status = 'normal'`
-    ).get(enrollmentId, classId) as { id: number; personId: number; name: string; phone: string | null } | undefined;
+    ).get(enrollmentId, classId) as { id: number; personId: number; name: string; dharmaName: string | null; phone: string | null } | undefined;
     if (!student) return void res.status(400).json({ error: "班长必须从本班在册学员中选择" });
-    if (!student.phone) return void res.status(400).json({ error: "该学员尚未填写手机号，请先补充手机号后再任命班长" });
     db.exec("begin immediate");
     try {
       const previous = db.prepare("select user_id as userId from class_monitors where class_id = ?").get(classId) as { userId: number } | undefined;
-      let user = db.prepare("select id from users where person_id = ?").get(student.personId) as { id: number } | undefined;
+      let user = db.prepare("select id, username from users where person_id = ?").get(student.personId) as { id: number; username: string } | undefined;
       let temporaryPassword: string | undefined;
+      const displayName = personDisplayName(student.name, student.dharmaName);
       if (!user) {
         temporaryPassword = generateTemporaryPassword();
+        const username = accountUsername(db, {
+          phone: student.phone, requested: req.body.username, displayName
+        });
         const result = db.prepare(
           `insert into users (person_id, username, password_hash, display_name, must_change_password) values (?, ?, ?, ?, 1)`
-        ).run(student.personId, student.phone, createPasswordHash(temporaryPassword), student.name);
-        user = { id: Number(result.lastInsertRowid) };
+        ).run(student.personId, username, createPasswordHash(temporaryPassword), displayName);
+        user = { id: Number(result.lastInsertRowid), username };
       }
       db.prepare("update users set active = 1, updated_at = current_timestamp where id = ?").run(user.id);
       db.prepare(
@@ -1024,7 +1086,10 @@ export function createApiRouter(db: DatabaseSync) {
       db.prepare("insert into class_monitors (class_id, enrollment_id, user_id, assigned_by) values (?, ?, ?, ?)")
         .run(classId, enrollmentId, user.id, req.user!.id);
       if (previous && previous.userId !== user.id) deactivateRolelessUser(db, previous.userId);
-      db.exec("commit"); res.json({ ok: true, userId: user.id, temporaryPassword, phone: student.phone });
+      db.exec("commit"); res.json({
+        ok: true, userId: user.id, temporaryPassword, phone: student.phone,
+        username: user.username, loginIdentifier: user.username
+      });
     } catch (error) { db.exec("rollback"); throw error; }
   });
 

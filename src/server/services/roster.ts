@@ -38,7 +38,7 @@ export function freezeLessonRoster(db: DatabaseSync, lessonId: number): void {
   if (!lesson || lesson.frozenAt) return;
 
   const rows = db.prepare(
-    `select e.id as enrollmentId, p.name, p.dharma_name as dharmaName,
+    `select e.id as enrollmentId, coalesce(nullif(trim(p.name), ''), p.dharma_name) as name, p.dharma_name as dharmaName,
             g.id as groupId, g.name as groupName
        from enrollments e
        join persons p on p.id = e.person_id

@@ -59,6 +59,12 @@ export const DEFAULT_COURSES: readonly CourseCatalogEntry[] = [
   { title: "同喜班复习课之五", lessonType: "review" },
 ];
 
+/** 新班级的“智慧人生”从官方第 1 课开始；旧课表继续保留原有顺序。 */
+export const WISDOM_LIFE_COURSES: readonly CourseCatalogEntry[] = [
+  { title: "第1课 《认识静心学堂》（《静心学堂学员手册》选读）", lessonType: "regular" },
+  ...DEFAULT_COURSES
+];
+
 export function coursePlanForRange(startSequence: number, count: number): {
   titles: string[];
   lessonTypes: LessonType[];

@@ -20,16 +20,29 @@ function lessonRows(db: DatabaseSync, classId: number): Array<LessonScheduleItem
   ).all(classId) as unknown as Array<LessonScheduleItem & { id: number; frozenAt: string | null }>;
 }
 
-function insertLessons(db: DatabaseSync, classId: number, lessons: LessonScheduleItem[]): void {
+function insertLessons(db: DatabaseSync, classId: number, lessons: LessonScheduleItem[], coursePositions?: number[]): void {
   const insert = db.prepare(
     `insert into lessons
-       (class_id, sequence, title, lesson_type, cadence_mode, outline_due_date, group_study_due_date, class_study_due_date)
-     values (?, ?, ?, ?, ?, ?, ?, ?)`
+       (class_id, sequence, title, lesson_type, cadence_mode, outline_due_date, group_study_due_date, class_study_due_date, course_position)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  for (const lesson of lessons) {
+  for (const [index, lesson] of lessons.entries()) {
     insert.run(classId, lesson.sequence, lesson.title, lesson.lessonType, lesson.cadenceMode,
-      lesson.outlineDueDate, lesson.groupStudyDueDate, lesson.classStudyDueDate);
+      lesson.outlineDueDate, lesson.groupStudyDueDate, lesson.classStudyDueDate, coursePositions?.[index] ?? null);
   }
+}
+
+function catalogPlan(db: DatabaseSync, seriesKey: string, startPosition: number, count: number) {
+  const rows = db.prepare(
+    `select position, title, lesson_type as lessonType
+       from course_catalog_items where series_key = ? and position >= ?
+      order by position limit ?`
+  ).all(seriesKey, startPosition, count) as Array<{ position: number; title: string; lessonType: LessonType }>;
+  if (!rows.length) throw new Error("所选课程起点不存在，请刷新课程目录后重试");
+  return {
+    titles: rows.map((row) => row.title), lessonTypes: rows.map((row) => row.lessonType),
+    positions: rows.map((row) => row.position)
+  };
 }
 
 export function createClass(db: DatabaseSync, input: {
@@ -68,17 +81,22 @@ export function createClass(db: DatabaseSync, input: {
 
 export function appendLessons(db: DatabaseSync, classId: number, count = 24): number {
   if (!Number.isInteger(count) || count < 1 || count > 100) throw new Error("追加课数必须为1至100");
-  const cls = db.prepare("select cadence_mode as cadenceMode from classes where id = ?").get(classId) as { cadenceMode: CadenceMode };
+  const cls = db.prepare(
+    "select cadence_mode as cadenceMode, course_series_key as courseSeriesKey, course_start_position as courseStartPosition from classes where id = ?"
+  ).get(classId) as { cadenceMode: CadenceMode; courseSeriesKey: string | null; courseStartPosition: number };
   const existing = lessonRows(db, classId);
   if (existing.length === 0) throw new Error("请先设置第一课截止日");
   const last = existing.at(-1)!;
   const nextDue = addDays(last.classStudyDueDate, cls.cadenceMode === "parallel_two_week" ? 14 : 7);
+  const plan = cls.courseSeriesKey
+    ? catalogPlan(db, cls.courseSeriesKey, cls.courseStartPosition + existing.length, count)
+    : { ...coursePlanForRange(last.sequence + 1, count), positions: [] as number[] };
   const generated = generateSchedule({
-    firstFinalDueDate: nextDue, count, cadenceMode: cls.cadenceMode, startSequence: last.sequence + 1,
-    ...coursePlanForRange(last.sequence + 1, count)
+    firstFinalDueDate: nextDue, count: plan.titles.length, cadenceMode: cls.cadenceMode,
+    startSequence: last.sequence + 1, titles: plan.titles, lessonTypes: plan.lessonTypes
   });
   db.exec("begin immediate");
-  try { insertLessons(db, classId, generated); db.exec("commit"); }
+  try { insertLessons(db, classId, generated, plan.positions); db.exec("commit"); }
   catch (error) { db.exec("rollback"); throw error; }
   return generated.length;
 }
@@ -88,23 +106,33 @@ export function setInitialSchedule(
   classId: number,
   firstDueDate: string,
   count = 50,
-  cadenceOverride?: CadenceMode
-): void {
+  cadenceOverride?: CadenceMode,
+  course?: { seriesKey: string; startPosition: number; round: number }
+): number {
   const existing = lessonRows(db, classId);
   if (existing.length > 0) throw new Error("课表已存在");
   const cls = db.prepare("select cadence_mode as cadenceMode from classes where id = ?").get(classId) as { cadenceMode: CadenceMode };
   const cadenceMode = cadenceOverride ?? cls.cadenceMode;
+  const plan = course
+    ? catalogPlan(db, course.seriesKey, course.startPosition, count)
+    : { ...coursePlanForRange(1, count), positions: [] as number[] };
   const generated = generateSchedule({
-    firstFinalDueDate: firstDueDate, count, cadenceMode,
-    ...coursePlanForRange(1, count)
+    firstFinalDueDate: firstDueDate, count: plan.titles.length, cadenceMode,
+    titles: plan.titles, lessonTypes: plan.lessonTypes
   });
   db.exec("begin immediate");
   try {
     if (cadenceOverride) {
       db.prepare("update classes set cadence_mode = ?, updated_at = current_timestamp where id = ?").run(cadenceOverride, classId);
     }
-    insertLessons(db, classId, generated);
+    if (course) {
+      db.prepare(
+        "update classes set course_series_key = ?, course_round = ?, course_start_position = ?, updated_at = current_timestamp where id = ?"
+      ).run(course.seriesKey, course.round, course.startPosition, classId);
+    }
+    insertLessons(db, classId, generated, plan.positions);
     db.exec("commit");
+    return generated.length;
   }
   catch (error) { db.exec("rollback"); throw error; }
 }

@@ -40,7 +40,7 @@ describe("普通学员手机号可选", () => {
       const columns = db.prepare("pragma table_info(persons)").all() as Array<{ name: string; notnull: number }>;
       expect(columns.find((column) => column.name === "phone")?.notnull).toBe(0);
       expect((db.prepare("select group_concat(version) as versions from schema_migrations").get() as { versions: string }).versions)
-        .toBe("1,2,3,4,5,6,7");
+        .toBe("1,2,3,4,5,6,7,8");
 
       const { classId, group } = await setupClass(admin);
       const first = await admin.post<{ studentId: number }>(`/classes/${classId}/students`, {
@@ -64,7 +64,7 @@ describe("普通学员手机号可选", () => {
     });
   });
 
-  it("无手机号不能任命班长，补充后可任命且登录账号不能再清空", async () => {
+  it("无手机号可用法名拼音账号担任班长，手机号之后仍可补充或清空", async () => {
     await withAdmin(async (_db, admin) => {
       const { classId, group } = await setupClass(admin);
       const student = await admin.post<{ studentId: number }>(`/classes/${classId}/students`, {
@@ -72,23 +72,26 @@ describe("普通学员手机号可选", () => {
         dharmaName: "善学",
         groupId: group.id,
       });
-      const blocked = await admin.put<{ error: string }>(`/classes/${classId}/monitor`, { studentId: student.body.studentId });
-      expect(blocked.status).toBe(400);
-      expect(blocked.body.error).toContain("先补充手机号");
+      const assignedWithoutPhone = await admin.put<{ temporaryPassword: string; phone: null; username: string }>(`/classes/${classId}/monitor`, { studentId: student.body.studentId });
+      expect(assignedWithoutPhone.status).toBe(200);
+      expect(assignedWithoutPhone.body.phone).toBeNull();
+      expect(assignedWithoutPhone.body.username).toBe("houxuanbanzhang");
 
-      expect((await admin.patch(`/classes/${classId}/students/${student.body.studentId}`, { phone: "13900003002" })).status).toBe(200);
-      const assigned = await admin.put<{ temporaryPassword: string; phone: string }>(`/classes/${classId}/monitor`, {
+      expect((await admin.patch(`/classes/${classId}/students/${student.body.studentId}`, {
+        phone: "13900003002", currentPassword: "admin12345"
+      })).status).toBe(200);
+      const assigned = await admin.put<{ temporaryPassword: string; phone: string; username: string }>(`/classes/${classId}/monitor`, {
         studentId: student.body.studentId,
       });
       expect(assigned.status).toBe(200);
       expect(assigned.body.phone).toBe("+8613900003002");
+      expect(assigned.body.username).toBe("houxuanbanzhang");
 
       const clear = await admin.patch<{ error: string }>(`/classes/${classId}/students/${student.body.studentId}`, {
         phone: "",
         currentPassword: "admin12345",
       });
-      expect(clear.status).toBe(400);
-      expect(clear.body.error).toContain("必须保留手机号");
+      expect(clear.status).toBe(200);
     });
   });
 
