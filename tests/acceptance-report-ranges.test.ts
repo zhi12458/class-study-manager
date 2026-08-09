@@ -43,7 +43,7 @@ function addAttendance(
   }
 }
 
-describe("报表四种时间范围验收", () => {
+describe("报表时间范围验收", () => {
   let db: DatabaseSync;
 
   beforeEach(() => {
@@ -128,6 +128,23 @@ describe("报表四种时间范围验收", () => {
       class_study: { completed: 1, applicable: 2, rate: 50 },
     });
 
+    const custom = buildClassReport(db, classId, "custom", "2026-06-15", {
+      from: "2026-04-20",
+      to: "2026-06-10",
+    });
+    expect(custom.filters).toEqual({ from: "2026-04-20", to: "2026-06-10" });
+    expect(custom.rangeLabel).toBe("2026-04-20 至 2026-06-10");
+    expect(custom.details).toHaveLength(5);
+    expect(custom.details.map((detail) => [detail.lessonSequence, detail.metric])).toEqual([
+      [2, "outline"], [2, "group_study"], [2, "class_study"],
+      [3, "outline"], [3, "group_study"],
+    ]);
+    expect(custom.classSummary).toMatchObject({
+      outline: { completed: 1, applicable: 2, rate: 50 },
+      group_study: { completed: 1, applicable: 2, rate: 50 },
+      class_study: { completed: 0, applicable: 1, rate: 0 },
+    });
+
     for (const report of Object.values(reports)) {
       expect(report.details.every((detail) => String(detail.dueDate) <= "2026-06-15")).toBe(true);
       for (const metric of ["outline", "group_study", "class_study"] as const) {
@@ -137,5 +154,6 @@ describe("报表四种时间范围验收", () => {
         expect(summary.applicable).toBe(detail.filter((row) => row.status !== null && row.status !== "not_required").length);
       }
     }
+    expect(custom.attention).toEqual(reports.history.attention);
   });
 });

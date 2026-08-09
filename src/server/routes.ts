@@ -2,8 +2,8 @@ import cookieParser from "cookie-parser";
 import ExcelJS from "exceljs";
 import express, { type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
+import { randomUUID } from "node:crypto";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
-import { z } from "zod";
 import {
   CADENCE_MODES, CLASS_STUDY_STATUSES, GROUP_STUDY_STATUSES, LESSON_TYPES,
   OUTLINE_STATUSES, REPORT_RANGES, ENROLLMENT_STATUSES, type AttendanceStatus, type CadenceMode,
@@ -20,7 +20,7 @@ import {
   rebuildFutureSchedule, setInitialSchedule, updateFutureCadence
 } from "./services/classes.js";
 import { classifyRosterRows, parseRosterWorkbook, type ImportRow } from "./services/importRoster.js";
-import { buildClassReport } from "./services/reportBuilder.js";
+import { buildClassReport, type CustomReportRange } from "./services/reportBuilder.js";
 import {
   assertPersonAvailableForEnrollment, freezeLessonRoster, getNextEffectiveSequence,
   freezeStartedLessons, lessonStartDate, setEnrollmentGroupFromSequence, setEnrollmentStatusFromSequence, shanghaiToday
@@ -31,10 +31,13 @@ import {
   assertPersonName, assertUsernameAvailable, normalizeCustomUsername,
   personDisplayName, suggestUniqueUsername
 } from "./services/accounts.js";
+import { LoginAttemptLimiter } from "./security.js";
+import { badRequest, classifyHttpError } from "./httpErrors.js";
 
 const COOKIE = "class_study_session";
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 const EDITABLE_ENROLLMENT_ROLES = ["group_leader", "charity", "dharma_light", "communications"] as const;
+const DUMMY_PASSWORD_HASH = createPasswordHash("timing-only-password-not-used");
 
 function numberParam(value: unknown, label = "ID"): number {
   const parsed = Number(value);
@@ -43,13 +46,32 @@ function numberParam(value: unknown, label = "ID"): number {
 }
 
 function validDate(value: unknown): string {
-  const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).parse(value);
+  const date = String(value ?? "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("日期必须使用 YYYY-MM-DD 格式");
   const [year, month, day] = date.split("-").map(Number);
   const parsed = new Date(Date.UTC(year, month - 1, day));
   if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) {
     throw new Error("日期无效");
   }
   return date;
+}
+
+function reportSelection(req: Request): { range: ReportRange; customRange?: CustomReportRange } {
+  const range = String(req.query.range ?? "recent") as ReportRange;
+  if (!REPORT_RANGES.includes(range)) throw badRequest("时间范围无效");
+  if (range !== "custom") return { range };
+  if (!req.query.from || !req.query.to) throw badRequest("自定义统计请选择开始和结束日期");
+  const from = validDate(req.query.from);
+  const to = validDate(req.query.to);
+  if (from > to) throw badRequest("开始日期不能晚于结束日期");
+  if (to > shanghaiToday()) throw badRequest("结束日期不能晚于今天");
+  return { range, customRange: { from, to } };
+}
+
+function reportFilename(report: ReturnType<typeof buildClassReport>, extension: "csv" | "xlsx"): string {
+  const from = report.filters.from.replaceAll("-", "");
+  const to = report.filters.to.replaceAll("-", "");
+  return `class-study-report-${from}-${to}.${extension}`;
 }
 
 function addDays(date: string, days: number): string {
@@ -79,7 +101,7 @@ const STATUS_NAMES: Record<string, string> = {
 function buildCsvExportRows(report: ReturnType<typeof buildClassReport>): Array<Record<string, unknown>> {
   const rows: Array<Record<string, unknown>> = [];
   const base = (recordType: string) => ({
-    "记录类型": recordType, "班级": report.class.name, "时间范围": report.range,
+    "记录类型": recordType, "班级": report.class.name, "时间范围": report.rangeLabel,
     "小组": "", "姓名": "", "课次": "", "课名": "", "指标": "", "应完成日期": "",
     "状态": "", "完成数": "", "已登记适用": "", "待登记": "", "完成率": "", "说明": ""
   });
@@ -322,6 +344,7 @@ function updateEnrollmentRoles(
 
 export function createApiRouter(db: DatabaseSync) {
   const router = express.Router();
+  const loginLimiter = new LoginAttemptLimiter();
   router.use(cookieParser());
   router.use(express.json({ limit: "4mb" }));
   router.use(loadUser(db));
@@ -341,13 +364,25 @@ export function createApiRouter(db: DatabaseSync) {
     const identifier = String(req.body.identifier ?? req.body.username ?? req.body.phone ?? "").trim();
     const password = String(req.body.password ?? "");
     if (!identifier || !password) return void res.status(400).json({ error: "请输入账号和密码" });
+    if (identifier.length > 64 || password.length > 256) return void res.status(400).json({ error: "账号或密码长度无效" });
     let normalized = identifier;
     if (identifier !== "admin" && !identifier.startsWith("admin")) {
       try { normalized = normalizePhone(identifier); } catch { /* custom admin name remains usable */ }
     }
+    const attemptKey = `${req.ip}|${normalized.toLowerCase()}`;
+    const retryAfter = loginLimiter.retryAfterSeconds(attemptKey);
+    if (retryAfter > 0) {
+      res.setHeader("Retry-After", String(retryAfter));
+      return void res.status(429).json({ error: "登录失败次数过多，请稍后再试" });
+    }
     const user = db.prepare("select id, password_hash as passwordHash from users where username = ? and active = 1")
       .get(normalized) as { id: number; passwordHash: string } | undefined;
-    if (!user || !verifyPassword(password, user.passwordHash)) return void res.status(401).json({ error: "账号或密码不正确" });
+    const passwordMatches = verifyPassword(password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+    if (!user || !passwordMatches) {
+      loginLimiter.recordFailure(attemptKey);
+      return void res.status(401).json({ error: "账号或密码不正确" });
+    }
+    loginLimiter.clear(attemptKey);
     const token = createSession(db, user.id);
     res.cookie(COOKIE, token, { httpOnly: true, sameSite: "strict", secure: process.env.COOKIE_SECURE === "true", maxAge: 7 * 86_400_000 });
     res.json({ ok: true });
@@ -1257,69 +1292,69 @@ export function createApiRouter(db: DatabaseSync) {
   });
 
   router.get("/classes/:classId/reports", requireAuth, requireClassAccess(db), (req, res) => {
-    const range = String(req.query.range ?? "recent") as ReportRange;
-    if (!REPORT_RANGES.includes(range)) return void res.status(400).json({ error: "时间范围无效" });
-    res.json(buildClassReport(db, numberParam(req.params.classId), range));
+    const selection = reportSelection(req);
+    res.json(buildClassReport(db, numberParam(req.params.classId), selection.range, undefined, selection.customRange));
   });
 
   router.get("/classes/:classId/export.csv", requireAuth, requireClassAccess(db, true), (req, res) => {
-    const range = String(req.query.range ?? "recent") as ReportRange;
-    if (!REPORT_RANGES.includes(range)) return void res.status(400).json({ error: "时间范围无效" });
-    const report = buildClassReport(db, numberParam(req.params.classId), range);
-    sendCsv(res, "class-study-report.csv", buildCsvExportRows(report));
+    const selection = reportSelection(req);
+    const report = buildClassReport(db, numberParam(req.params.classId), selection.range, undefined, selection.customRange);
+    sendCsv(res, reportFilename(report, "csv"), buildCsvExportRows(report));
   });
 
   router.get("/classes/:classId/export.xlsx", requireAuth, requireClassAccess(db, true), async (req, res) => {
-    const range = String(req.query.range ?? "recent") as ReportRange;
-    if (!REPORT_RANGES.includes(range)) return void res.status(400).json({ error: "时间范围无效" });
-    const report = buildClassReport(db, numberParam(req.params.classId), range);
+    const selection = reportSelection(req);
+    const report = buildClassReport(db, numberParam(req.params.classId), selection.range, undefined, selection.customRange);
     const workbook = new ExcelJS.Workbook(); workbook.creator = "班级共修管理系统";
     const summary = workbook.addWorksheet("班级汇总");
-    summary.columns = [{ header: "班级", key: "className", width: 22 }, { header: "指标", key: "metric", width: 20 }, { header: "完成", key: "completed", width: 12 },
+    summary.columns = [{ header: "班级", key: "className", width: 22 }, { header: "统计范围", key: "rangeLabel", width: 28 }, { header: "指标", key: "metric", width: 20 }, { header: "完成", key: "completed", width: 12 },
       { header: "已登记适用", key: "applicable", width: 14 }, { header: "待登记", key: "pending", width: 12 }, { header: "完成率", key: "rate", width: 12 }];
-    summary.addRows(Object.entries(report.classSummary).map(([metric, value]) => ({ className: report.class.name, metric: METRIC_NAMES[metric], ...(value as Record<string, unknown>),
+    summary.addRows(Object.entries(report.classSummary).map(([metric, value]) => ({ className: report.class.name, rangeLabel: report.rangeLabel, metric: METRIC_NAMES[metric], ...(value as Record<string, unknown>),
       rate: (value as { rate: number | null }).rate == null ? "不适用" : `${(value as { rate: number }).rate}%` })));
     const group = workbook.addWorksheet("小组汇总");
-    group.columns = [{ header: "班级", key: "className", width: 22 }, { header: "小组", key: "groupName", width: 16 },
+    group.columns = [{ header: "班级", key: "className", width: 22 }, { header: "统计范围", key: "rangeLabel", width: 28 }, { header: "小组", key: "groupName", width: 16 },
       { header: "指标", key: "metric", width: 18 }, { header: "完成", key: "completed", width: 12 },
       { header: "已登记适用", key: "applicable", width: 14 }, { header: "待登记", key: "pending", width: 12 },
       { header: "完成率", key: "rate", width: 12 }];
     group.addRows(report.groupSummaries.flatMap((item) => Object.entries(item.metrics).map(([metric, value]) => ({
-      className: report.class.name, groupName: item.groupName, metric: METRIC_NAMES[metric], completed: value.completed,
+      className: report.class.name, rangeLabel: report.rangeLabel, groupName: item.groupName, metric: METRIC_NAMES[metric], completed: value.completed,
       applicable: value.applicable, pending: value.pending, rate: value.rate == null ? "不适用" : `${value.rate}%`
     }))));
     const personal = workbook.addWorksheet("个人统计");
-    personal.columns = [{ header: "班级", key: "className", width: 22 }, { header: "组别", key: "groupName", width: 14 }, { header: "姓名", key: "name", width: 18 },
+    personal.columns = [{ header: "班级", key: "className", width: 22 }, { header: "统计范围", key: "rangeLabel", width: 28 }, { header: "组别", key: "groupName", width: 14 }, { header: "姓名", key: "name", width: 18 },
       { header: "法名", key: "dharmaName", width: 16 },
       { header: "导图/提纲", key: "outline", width: 14 }, { header: "组修", key: "group", width: 14 }, { header: "班修", key: "classStudy", width: 14 }];
-    personal.addRows(report.personalStats.map((row) => ({ className: report.class.name, groupName: row.groupName, name: row.name, dharmaName: row.dharmaName,
+    personal.addRows(report.personalStats.map((row) => ({ className: report.class.name, rangeLabel: report.rangeLabel, groupName: row.groupName, name: row.name, dharmaName: row.dharmaName,
       outline: row.metrics.outline.rate == null ? "不适用" : `${row.metrics.outline.rate}%`,
       group: row.metrics.group_study.rate == null ? "不适用" : `${row.metrics.group_study.rate}%`,
       classStudy: row.metrics.class_study.rate == null ? "不适用" : `${row.metrics.class_study.rate}%` })));
     const detail = workbook.addWorksheet("逐课明细");
-    detail.columns = [{ header: "班级", key: "className", width: 22 }, { header: "小组", key: "groupName", width: 16 },
+    detail.columns = [{ header: "班级", key: "className", width: 22 }, { header: "统计范围", key: "rangeLabel", width: 28 }, { header: "小组", key: "groupName", width: 16 },
       { header: "姓名", key: "studentName", width: 18 }, { header: "法名", key: "dharmaName", width: 16 },
       { header: "课次", key: "lessonSequence", width: 10 }, { header: "课名", key: "lessonTitle", width: 22 },
       { header: "指标", key: "metricName", width: 18 }, { header: "应完成日期", key: "dueDate", width: 15 },
       { header: "状态", key: "statusName", width: 14 }];
-    detail.addRows(report.details.map((row) => ({ ...row, metricName: METRIC_NAMES[String(row.metric)],
+    detail.addRows(report.details.map((row) => ({ ...row, rangeLabel: report.rangeLabel, metricName: METRIC_NAMES[String(row.metric)],
       statusName: row.status == null ? "待登记" : STATUS_NAMES[String(row.status)] })));
     const attention = workbook.addWorksheet("需关注名单");
-    attention.columns = [{ header: "班级", key: "className", width: 22 }, { header: "小组", key: "groupName", width: 16 },
+    attention.columns = [{ header: "班级", key: "className", width: 22 }, { header: "统计范围", key: "rangeLabel", width: 28 }, { header: "小组", key: "groupName", width: 16 },
       { header: "姓名", key: "name", width: 18 }, { header: "原因", key: "reasons", width: 60 }];
-    attention.addRows(report.attention.map((row) => ({ className: report.class.name, groupName: row.groupName,
+    attention.addRows(report.attention.map((row) => ({ className: report.class.name, rangeLabel: report.rangeLabel, groupName: row.groupName,
       name: row.name, reasons: row.reasons.join("；") })));
     workbook.worksheets.forEach((sheet) => { sheet.getRow(1).font = { bold: true }; });
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition", 'attachment; filename="class-study-report.xlsx"');
+    res.setHeader("Content-Disposition", `attachment; filename="${reportFilename(report, "xlsx")}"`);
     await workbook.xlsx.write(res); res.end();
   });
 
   router.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const message = error instanceof Error ? error.message : "服务器错误";
-    console.error(error);
-    const conflict = /unique|已存在|已被|重复/i.test(message);
-    res.status(conflict ? 409 : 400).json({ error: message });
+    const publicError = classifyHttpError(error);
+    const requestId = randomUUID();
+    if (publicError.internal) console.error(`[${requestId}]`, error);
+    const body: Record<string, string> = { error: publicError.message };
+    if (publicError.code) body.code = publicError.code;
+    if (publicError.internal) body.requestId = requestId;
+    res.status(publicError.status).json(body);
   });
   return router;
 }

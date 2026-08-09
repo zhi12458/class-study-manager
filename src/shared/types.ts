@@ -17,7 +17,7 @@ export const CLASS_STUDY_STATUSES = ["onsite", "online", "makeup", "share", "abs
 export type ClassStudyStatus = (typeof CLASS_STUDY_STATUSES)[number];
 export type AttendanceStatus = OutlineStatus | GroupStudyStatus | ClassStudyStatus;
 
-export const REPORT_RANGES = ["recent", "month", "three_months", "history"] as const;
+export const REPORT_RANGES = ["recent", "month", "three_months", "history", "custom"] as const;
 export type ReportRange = (typeof REPORT_RANGES)[number];
 
 export const ENROLLMENT_STATUSES = ["normal", "leave", "withdrawn"] as const;

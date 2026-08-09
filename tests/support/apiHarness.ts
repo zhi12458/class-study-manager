@@ -1,9 +1,8 @@
-import express from "express";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { DatabaseSync } from "node:sqlite";
 
-import { createApiRouter } from "../../src/server/routes.js";
+import { createApp } from "../../src/server/app.js";
 
 export interface JsonResponse<T = Record<string, unknown>> {
   status: number;
@@ -109,9 +108,7 @@ export interface TestApiServer {
 }
 
 export async function startTestApi(db: DatabaseSync): Promise<TestApiServer> {
-  const app = express();
-  app.disable("x-powered-by");
-  app.use("/api", createApiRouter(db));
+  const app = createApp(db);
   const server = await new Promise<Server>((resolve) => {
     const listening = app.listen(0, "127.0.0.1", () => resolve(listening));
   });

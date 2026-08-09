@@ -368,6 +368,15 @@ td strong { color: #253b55; }
 .range-tabs button, .subtabs button { min-height: 34px; color: #65798d; background: transparent; border: 0; }
 .range-tabs button.active, .subtabs button.active { color: #0d73c6; background: #fff; box-shadow: 0 2px 7px rgba(36,79,114,.1); }
 .data-range { color: var(--muted); font-size: 12px; }
+.history-range-panel { width: fit-content; max-width: 100%; padding: 12px; display: grid; gap: 10px; background: #fff; border: 1px solid var(--line); border-radius: 13px; box-shadow: 0 4px 14px rgba(35,81,116,.05); }
+.history-mode { display: flex; gap: 6px; }
+.history-mode button { min-height: 34px; color: #65798d; background: #eef4f8; border: 1px solid transparent; }
+.history-mode button.active { color: #0d73c6; background: #e8f4fd; border-color: #b9dcf5; }
+.custom-date-controls { display: flex; align-items: end; gap: 9px; }
+.custom-date-controls label { display: grid; gap: 5px; color: #65798d; font-size: 11px; font-weight: 750; }
+.custom-date-controls input { min-width: 165px; }
+.custom-date-controls > span { padding-bottom: 13px; color: var(--muted); }
+.history-range-panel > small { color: #9a6c29; line-height: 1.5; }
 .report-detail { display: grid; gap: 18px; }
 .subtabs button span { min-width: 20px; height: 20px; display: grid; place-items: center; color: #b33d4b; background: #fde8eb; border-radius: 999px; font-size: 10px; }
 .rate-cell { display: grid; gap: 2px; }
@@ -397,8 +406,8 @@ td strong { color: #253b55; }
 
 @media (max-width: 960px) {
   .app-shell { grid-template-columns: 1fr; }
-  .sidebar { position: fixed; left: 0; transform: translateX(-105%); width: min(280px, 86vw); transition: transform .22s ease; }
-  .sidebar.open { transform: translateX(0); }
+  .sidebar { position: fixed; left: 0; transform: translateX(-105%); visibility: hidden; width: min(280px, 86vw); transition: transform .22s ease, visibility 0s linear .22s; }
+  .sidebar.open { transform: translateX(0); visibility: visible; transition: transform .22s ease; }
   .mobile-close, .mobile-menu { display: inline-flex; }
   .mobile-scrim { position: fixed; inset: 0; z-index: 29; width: 100%; height: 100%; min-height: 0; padding: 0; border: 0; border-radius: 0; background: rgba(11,38,65,.42); opacity: 0; visibility: hidden; display: block; transition: opacity .2s, visibility .2s; }
   .mobile-scrim.show { opacity: 1; visibility: visible; }
@@ -475,6 +484,11 @@ td strong { color: #253b55; }
   .save-dock button { padding: 0 11px; }
   .range-tabs { width: 100%; overflow-x: auto; }
   .range-tabs button { flex: 1; padding: 0 10px; }
+  .history-range-panel { width: 100%; }
+  .history-mode { display: grid; grid-template-columns: 1fr 1fr; }
+  .custom-date-controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: end; }
+  .custom-date-controls label, .custom-date-controls input { min-width: 0; width: 100%; }
+  .custom-date-controls button { grid-column: 1 / -1; }
   .subtabs { width: 100%; overflow-x: auto; }
   .subtabs button { flex: 1; }
   .report-card h3 { padding-bottom: 7px; border-bottom: 1px solid #edf2f5; }

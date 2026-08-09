@@ -5,7 +5,7 @@ export type Metric = "outline" | "group_study" | "class_study";
 export type OutlineStatus = "yes" | "no" | "not_required";
 export type GroupStudyStatus = "present" | "absent";
 export type ClassStudyStatus = "onsite" | "online" | "makeup" | "share" | "absent";
-export type ReportRange = "recent" | "month" | "three_months" | "history";
+export type ReportRange = "recent" | "month" | "three_months" | "history" | "custom";
 export type EnrollmentStatus = "normal" | "leave" | "withdrawn";
 export type EnrollmentRole = "monitor" | "group_leader" | "charity" | "dharma_light" | "communications" | "student";
 
@@ -141,6 +141,8 @@ export interface MetricSummary {
 
 export interface ReportPayload {
   range: ReportRange;
+  rangeLabel?: string;
+  filters?: { from: string; to: string };
   classSummary: Record<Metric, MetricSummary>;
   groupSummaries: Array<{
     groupId: number;
@@ -229,8 +231,17 @@ export function unwrap<T>(value: T | { data: T }, key?: string): T {
   return value as T;
 }
 
-export function exportUrl(classId: number, format: "xlsx" | "csv", range: ReportRange): string {
+export function exportUrl(
+  classId: number,
+  format: "xlsx" | "csv",
+  range: ReportRange,
+  dates?: { from: string; to: string },
+): string {
   const params = new URLSearchParams({ range });
+  if (range === "custom" && dates) {
+    params.set("from", dates.from);
+    params.set("to", dates.to);
+  }
   return `/api/classes/${classId}/export.${format}?${params.toString()}`;
 }
 

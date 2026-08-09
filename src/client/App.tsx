@@ -35,6 +35,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -76,8 +77,11 @@ const RANGE_LABELS: Record<ReportRange, string> = {
   recent: "最近",
   month: "当月",
   three_months: "最近 3 个月",
-  history: "历史"
+  history: "历史",
+  custom: "自定义时间段"
 };
+const PRESET_REPORT_RANGES = ["recent", "month", "three_months", "history"] as const;
+type PresetReportRange = (typeof PRESET_REPORT_RANGES)[number];
 const OUTLINE_OPTIONS: Array<{ value: OutlineStatus; label: string }> = [
   { value: "yes", label: "是" },
   { value: "no", label: "否" }
@@ -118,6 +122,14 @@ function errorText(error: unknown) {
 
 function dateOnly(value: unknown) {
   return typeof value === "string" ? value.slice(0, 10) : "";
+}
+
+function shanghaiTodayClient(): string {
+  const parts = new Intl.DateTimeFormat("en", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit"
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 function classFromRaw(raw: Record<string, unknown>): ClassSummary {
@@ -227,20 +239,65 @@ function EmptyState({ icon, title, detail, action }: { icon?: ReactNode; title: 
 }
 
 function Modal({ title, subtitle, children, onClose, wide = false }: { title: string; subtitle?: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const onCloseRef = useRef(onClose);
+  const returnFocusRef = useRef<HTMLElement | null>(
+    typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null
+  );
+  const titleId = useId();
+  onCloseRef.current = onClose;
+  const close = () => {
+    const returnFocus = returnFocusRef.current;
+    onCloseRef.current();
+    window.setTimeout(() => returnFocus?.focus({ preventScroll: true }), 0);
+  };
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const focusableSelector = "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
+    const focusFirst = () => {
+      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(focusableSelector);
+      (focusable?.[0] ?? dialogRef.current)?.focus();
+    };
+    const frame = window.requestAnimationFrame(focusFirst);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = [...dialogRef.current.querySelectorAll<HTMLElement>(focusableSelector)]
+        .filter((element) => element.offsetParent !== null);
+      if (!focusable.length) {
+        event.preventDefault();
+        dialogRef.current.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault(); first.focus();
+      }
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, []);
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className={`modal-card ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && close()}>
+      <section ref={dialogRef} className={`modal-card ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}>
         <header className="modal-head">
           <div>
-            <h2>{title}</h2>
+            <h2 id={titleId}>{title}</h2>
             {subtitle && <p>{subtitle}</p>}
           </div>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭">
+          <button type="button" className="icon-button" onClick={close} aria-label="关闭">
             <X size={19} />
           </button>
         </header>
@@ -413,6 +470,8 @@ type ShellProps = {
 function AppShell({ user, classes, currentClass, onSelectClass, onLogout, children }: ShellProps) {
   const { path, go } = useNavigation();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const mobileCloseButtonRef = useRef<HTMLButtonElement>(null);
   const manager = user.isAdmin || currentClass?.permission === "counselor";
   const navItems = [
     { path: "/overview", label: "班级总览", icon: LayoutDashboard, needsClass: true },
@@ -426,18 +485,33 @@ function AppShell({ user, classes, currentClass, onSelectClass, onLogout, childr
     { path: "/profile", label: "我的资料", icon: UserRound, needsClass: false }
   ].filter((item) => !item.manager || manager);
 
+  const closeMobileMenu = useCallback((restoreFocus = true) => {
+    setMobileOpen(false);
+    if (restoreFocus) window.requestAnimationFrame(() => mobileMenuButtonRef.current?.focus());
+  }, []);
+
   function navigate(next: string) {
-    if (go(next)) setMobileOpen(false);
+    if (go(next)) closeMobileMenu();
   }
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const frame = window.requestAnimationFrame(() => mobileCloseButtonRef.current?.focus());
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMobileMenu();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => { window.cancelAnimationFrame(frame); window.removeEventListener("keydown", onKey); };
+  }, [closeMobileMenu, mobileOpen]);
 
   return (
     <div className="app-shell">
-      <button className={`mobile-scrim ${mobileOpen ? "show" : ""}`} aria-label="关闭菜单" onClick={() => setMobileOpen(false)} />
-      <aside className={`sidebar ${mobileOpen ? "open" : ""}`}>
+      <button className={`mobile-scrim ${mobileOpen ? "show" : ""}`} aria-label="关闭菜单" tabIndex={mobileOpen ? 0 : -1} onClick={() => closeMobileMenu()} />
+      <aside id="main-navigation" className={`sidebar ${mobileOpen ? "open" : ""}`} aria-label="主导航">
         <div className="sidebar-brand">
           <div className="brand-icon"><BookOpenCheck size={23} /></div>
           <div><strong>班级共修</strong><span>管理系统</span></div>
-          <button className="mobile-close icon-button" onClick={() => setMobileOpen(false)} aria-label="收起菜单"><X size={20} /></button>
+          <button ref={mobileCloseButtonRef} className="mobile-close icon-button" onClick={() => closeMobileMenu()} aria-label="关闭菜单"><X size={20} /></button>
         </div>
         <nav className="main-nav">
           <span className="nav-caption">班级空间</span>
@@ -459,7 +533,7 @@ function AppShell({ user, classes, currentClass, onSelectClass, onLogout, childr
       </aside>
       <section className="workspace">
         <header className="topbar">
-          <button className="mobile-menu icon-button" onClick={() => setMobileOpen(true)}><Menu size={21} /></button>
+          <button ref={mobileMenuButtonRef} className="mobile-menu icon-button" onClick={() => setMobileOpen(true)} aria-label="打开菜单" aria-expanded={mobileOpen} aria-controls="main-navigation"><Menu size={21} /></button>
           <div className="class-switcher-wrap">
             <span>当前班级</span>
             {classes.length > 0 ? (
@@ -848,7 +922,17 @@ function reportFromRaw(payload: unknown, range: ReportRange): ReportPayload {
     groupName: String(item.groupName ?? ""),
     reasons: Array.isArray(item.reasons) ? item.reasons.map(String) : [String(item.reason ?? "近期班修需要关注")]
   }));
-  return { range, classSummary, groupSummaries, personalStats, attention };
+  const filtersRaw = (raw.filters && typeof raw.filters === "object" ? raw.filters : {}) as Record<string, unknown>;
+  return {
+    range,
+    rangeLabel: raw.rangeLabel == null ? RANGE_LABELS[range] : String(raw.rangeLabel),
+    filters: filtersRaw.from && filtersRaw.to ? { from: dateOnly(filtersRaw.from), to: dateOnly(filtersRaw.to) } : undefined,
+    classSummary,
+    groupSummaries,
+    personalStats,
+    attention,
+    lessons: asList<Record<string, unknown>>(raw.lessons ?? [], "lessons", "items").map(lessonFromRaw)
+  };
 }
 
 function MetricCard({ metric, summary, compact = false }: { metric: Metric; summary: MetricSummary; compact?: boolean }) {
@@ -1728,29 +1812,78 @@ function AttendancePage({ currentClass, user }: { currentClass: ClassSummary; us
 }
 
 function ReportsPage({ currentClass, canExport }: { currentClass: ClassSummary; canExport: boolean }) {
-  const [range, setRange] = useState<ReportRange>("recent");
+  const today = shanghaiTodayClient();
+  const [presetRange, setPresetRange] = useState<PresetReportRange>("recent");
+  const [historyMode, setHistoryMode] = useState<"all" | "custom">("all");
+  const [customDraft, setCustomDraft] = useState({ from: today, to: today });
+  const [customApplied, setCustomApplied] = useState({ from: today, to: today });
+  const [datesInitialized, setDatesInitialized] = useState(false);
   const [report, setReport] = useState<ReportPayload | null>(null);
   const [tab, setTab] = useState<"groups" | "people" | "attention">("groups");
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<NoticeState>(null);
+  const range: ReportRange = presetRange === "history" && historyMode === "custom" ? "custom" : presetRange;
   const load = useCallback(async () => {
     setLoading(true); setNotice(null);
     try {
-      const data = await apiJson<unknown>(`/api/classes/${currentClass.id}/reports?range=${range}`);
+      const params = new URLSearchParams({ range });
+      if (range === "custom") {
+        params.set("from", customApplied.from);
+        params.set("to", customApplied.to);
+      }
+      const data = await apiJson<unknown>(`/api/classes/${currentClass.id}/reports?${params.toString()}`);
       setReport(reportFromRaw(data, range));
     } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
     finally { setLoading(false); }
-  }, [currentClass.id, range]);
+  }, [currentClass.id, customApplied.from, customApplied.to, range]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    setPresetRange("recent");
+    setHistoryMode("all");
+    setCustomDraft({ from: today, to: today });
+    setCustomApplied({ from: today, to: today });
+    setDatesInitialized(false);
+  }, [currentClass.id, today]);
+  useEffect(() => {
+    if (datesInitialized || !report?.lessons) return;
+    const dueDates = report.lessons.flatMap((lesson) => [lesson.outlineDueDate, lesson.groupStudyDueDate, lesson.classStudyDueDate]).filter(Boolean);
+    const dates = { from: dueDates.sort()[0] ?? today, to: today };
+    setCustomDraft(dates);
+    setCustomApplied(dates);
+    setDatesInitialized(true);
+  }, [datesInitialized, report?.lessons, today]);
+
+  function applyCustomRange() {
+    if (!customDraft.from || !customDraft.to) return setNotice({ tone: "error", text: "请选择开始和结束日期" });
+    if (customDraft.from > customDraft.to) return setNotice({ tone: "error", text: "开始日期不能晚于结束日期" });
+    if (customDraft.to > today) return setNotice({ tone: "error", text: "结束日期不能晚于今天" });
+    setNotice(null);
+    setCustomApplied(customDraft);
+  }
+
+  const exportDates = range === "custom" ? customApplied : undefined;
 
   return <main className="page">
-    <PageHeader eyebrow="REPORTS" title="完成统计" description="导图/提纲、组修和班修独立计算，不生成混合总分。" actions={canExport ? <div className="export-actions"><a className="secondary button" href={exportUrl(currentClass.id, "xlsx", range)}><Download size={16} /> Excel</a><a className="ghost button" href={exportUrl(currentClass.id, "csv", range)}><Download size={16} /> CSV</a></div> : undefined} />
-    <div className="range-tabs" role="tablist">{(Object.keys(RANGE_LABELS) as ReportRange[]).map((item) => <button key={item} className={range === item ? "active" : ""} onClick={() => setRange(item)}>{RANGE_LABELS[item]}</button>)}</div>
+    <PageHeader eyebrow="REPORTS" title="完成统计" description="导图/提纲、组修和班修独立计算，不生成混合总分。" actions={canExport ? <div className="export-actions"><a className="secondary button" href={exportUrl(currentClass.id, "xlsx", range, exportDates)}><Download size={16} /> Excel</a><a className="ghost button" href={exportUrl(currentClass.id, "csv", range, exportDates)}><Download size={16} /> CSV</a></div> : undefined} />
+    <div className="range-tabs" role="tablist" aria-label="统计范围">{PRESET_REPORT_RANGES.map((item) => <button key={item} role="tab" aria-selected={presetRange === item} className={presetRange === item ? "active" : ""} onClick={() => setPresetRange(item)}>{RANGE_LABELS[item]}</button>)}</div>
+    {presetRange === "history" && <section className="history-range-panel" aria-label="历史统计范围">
+      <div className="history-mode" role="group" aria-label="历史范围模式">
+        <button className={historyMode === "all" ? "active" : ""} onClick={() => setHistoryMode("all")}>完整历史</button>
+        <button className={historyMode === "custom" ? "active" : ""} onClick={() => setHistoryMode("custom")}>自定义时间段</button>
+      </div>
+      {historyMode === "custom" && <div className="custom-date-controls">
+        <label>开始日期<input type="date" value={customDraft.from} max={today} onChange={(event) => setCustomDraft((current) => ({ ...current, from: event.target.value }))} /></label>
+        <span aria-hidden="true">至</span>
+        <label>结束日期<input type="date" value={customDraft.to} max={today} onChange={(event) => setCustomDraft((current) => ({ ...current, to: event.target.value }))} /></label>
+        <button className="primary" onClick={applyCustomRange} disabled={loading}>查询</button>
+      </div>}
+      {historyMode === "custom" && (customDraft.from !== customApplied.from || customDraft.to !== customApplied.to) && <small>日期尚未查询；当前统计和导出仍使用 {customApplied.from} 至 {customApplied.to}。</small>}
+    </section>}
     <Notice notice={notice} />
     {loading ? <Loading text="正在计算完成率..." /> : report && <>
-      <section><div className="section-title"><div><h2>全班三项完成率</h2><p>按全班适用人次汇总，不对个人百分比取平均。</p></div><span className="data-range">{RANGE_LABELS[range]}</span></div><div className="metric-grid">{(["outline", "group_study", "class_study"] as Metric[]).map((metric) => <MetricCard key={metric} metric={metric} summary={report.classSummary[metric]} />)}</div></section>
+      <section><div className="section-title"><div><h2>全班三项完成率</h2><p>按全班适用人次汇总，不对个人百分比取平均。</p></div><span className="data-range">{report.rangeLabel ?? RANGE_LABELS[range]}</span></div><div className="metric-grid">{(["outline", "group_study", "class_study"] as Metric[]).map((metric) => <MetricCard key={metric} metric={metric} summary={report.classSummary[metric]} />)}</div></section>
       <section className="panel report-detail">
-        <div className="subtabs"><button className={tab === "groups" ? "active" : ""} onClick={() => setTab("groups")}>小组汇总</button><button className={tab === "people" ? "active" : ""} onClick={() => setTab("people")}>个人统计</button><button className={tab === "attention" ? "active" : ""} onClick={() => setTab("attention")}>需关注 <span>{report.attention.length}</span></button></div>
+        <div className="subtabs"><button className={tab === "groups" ? "active" : ""} onClick={() => setTab("groups")}>小组汇总</button><button className={tab === "people" ? "active" : ""} onClick={() => setTab("people")}>个人统计</button><button className={tab === "attention" ? "active" : ""} onClick={() => setTab("attention")}>当前需关注 <span>{report.attention.length}</span></button></div>
         {tab === "groups" && (report.groupSummaries.length ? <><div className="table-wrap desktop-table"><table><thead><tr><th>小组</th>{(["outline", "group_study", "class_study"] as Metric[]).map((m) => <th key={m}>{METRIC_LABELS[m]}</th>)}<th>待登记</th></tr></thead><tbody>{report.groupSummaries.map((group) => <tr key={group.groupId}><td><strong>{group.groupName}</strong></td>{(["outline", "group_study", "class_study"] as Metric[]).map((m) => <td key={m}><div className="rate-cell"><strong>{formatRate(group.metrics[m])}</strong><span>{group.metrics[m].completed}/{group.metrics[m].applicable}</span></div></td>)}<td>{Object.values(group.metrics).reduce((sum, item) => sum + item.pending, 0)}</td></tr>)}</tbody></table></div><div className="mobile-card-list">{report.groupSummaries.map((group) => <article className="report-card" key={group.groupId}><h3>{group.groupName}</h3>{(["outline", "group_study", "class_study"] as Metric[]).map((m) => <div key={m}><span>{METRIC_LABELS[m]}</span><strong>{formatRate(group.metrics[m])}</strong><small>{group.metrics[m].completed}/{group.metrics[m].applicable}</small></div>)}</article>)}</div></> : <EmptyState title="暂无小组统计" detail="当前时间范围内还没有已到期的登记数据。" />)}
         {tab === "people" && (report.personalStats.length ? <><div className="table-wrap desktop-table"><table><thead><tr><th>学员</th><th>小组</th>{(["outline", "group_study", "class_study"] as Metric[]).map((m) => <th key={m}>{METRIC_LABELS[m]}</th>)}<th>待登记</th></tr></thead><tbody>{report.personalStats.map((person) => <tr key={person.studentId}><td><div className="person-cell"><div className="mini-avatar">{person.name.slice(0, 1)}</div><span><strong>{person.name}</strong><small>{person.dharmaName || ""}</small></span></div></td><td>{person.groupName}</td>{(["outline", "group_study", "class_study"] as Metric[]).map((m) => <td key={m}><strong>{formatRate(person.metrics[m])}</strong></td>)}<td>{Object.values(person.metrics).reduce((sum, item) => sum + item.pending, 0)}</td></tr>)}</tbody></table></div><div className="mobile-card-list">{report.personalStats.map((person) => <article className="report-card person-report" key={person.studentId}><div className="person-cell"><div className="mini-avatar">{person.name.slice(0, 1)}</div><span><strong>{person.name}</strong><small>{person.groupName}</small></span></div>{(["outline", "group_study", "class_study"] as Metric[]).map((m) => <div key={m}><span>{METRIC_LABELS[m]}</span><strong>{formatRate(person.metrics[m])}</strong></div>)}</article>)}</div></> : <EmptyState title="暂无个人统计" detail="当前范围内没有适用数据。" />)}
         {tab === "attention" && (report.attention.length ? <div className="risk-grid">{report.attention.map((person) => <article className="risk-card" key={person.studentId}><div className="risk-icon"><AlertTriangle size={20} /></div><div><h3>{person.name}</h3><span>{person.groupName}</span><ul>{person.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul></div></article>)}</div> : <EmptyState icon={<Check size={28} />} title="当前没有需关注学员" detail="最近班修记录没有触发连续三次或三个月五次规则。" />)}

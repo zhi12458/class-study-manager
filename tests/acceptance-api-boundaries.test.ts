@@ -261,7 +261,7 @@ describe("API 边界、事务与文件响应验收", () => {
       const csv = await admin.raw(`/classes/${classId}/export.csv?range=recent`);
       expect(csv.status).toBe(200);
       expect(csv.headers.get("content-type")).toContain("text/csv");
-      expect(csv.headers.get("content-disposition")).toContain("class-study-report.csv");
+      expect(csv.headers.get("content-disposition")).toMatch(/class-study-report-\d{8}-\d{8}\.csv/);
       const csvText = csv.body.toString("utf8");
       expect(csvText.charCodeAt(0)).toBe(0xfeff);
       expect(csvText).toContain("\"记录类型\",\"班级\"");
@@ -295,6 +295,68 @@ describe("API 边界、事务与文件响应验收", () => {
       expect(roster.getRow(1).values).toEqual([, "姓名", "法名", "电话", "小组", "状态", "身份", "备注"]);
       expect(roster.getCell("D2").dataValidation).toMatchObject({ type: "list", formulae: ['"第一组"'] });
       expect(roster.getCell("E2").dataValidation).toMatchObject({ type: "list", allowBlank: true });
+    });
+  });
+
+  it("自定义日期报表和两种导出严格使用同一已选范围，并拒绝无效日期", async () => {
+    await withApi(async ({ admin, adminId }) => {
+      const classId = await createClass(admin, adminId, "自定义范围班", 1);
+      const groupId = (await groups(admin, classId))[0].id;
+      const studentId = await addStudent(admin, classId, groupId, "范围导出学员", "13700000261");
+      const firstDue = addDays(shanghaiToday(), -14);
+      const secondDue = addDays(shanghaiToday(), -7);
+      expect((await admin.post(`/classes/${classId}/schedule/generate`, {
+        firstDueDate: firstDue,
+        count: 2,
+      })).status).toBe(200);
+      const lessons = (await admin.get<{
+        lessons: Array<{ id: number; lessonNumber: number }>;
+      }>(`/classes/${classId}/lessons`)).body.lessons;
+      expect((await admin.put(`/classes/${classId}/attendance/${lessons[0].id}`, {
+        records: [{ studentId, outline: "yes", groupStudy: "present", classStudy: "online" }],
+      })).status).toBe(200);
+      expect((await admin.put(`/classes/${classId}/attendance/${lessons[1].id}`, {
+        records: [{ studentId, outline: "no", groupStudy: "absent", classStudy: "share" }],
+      })).status).toBe(200);
+
+      const query = `range=custom&from=${firstDue}&to=${firstDue}`;
+      const report = await admin.get<{
+        rangeLabel: string;
+        filters: { from: string; to: string };
+        details: Array<{ lessonSequence: number }>;
+      }>(`/classes/${classId}/reports?${query}`);
+      expect(report.status).toBe(200);
+      expect(report.body.filters).toEqual({ from: firstDue, to: firstDue });
+      expect(report.body.rangeLabel).toBe(`${firstDue} 至 ${firstDue}`);
+      expect(report.body.details).toHaveLength(3);
+      expect(report.body.details.every((row) => row.lessonSequence === 1)).toBe(true);
+
+      const csv = await admin.raw(`/classes/${classId}/export.csv?${query}`);
+      expect(csv.status).toBe(200);
+      expect(csv.headers.get("content-disposition")).toContain(
+        `class-study-report-${firstDue.replaceAll("-", "")}-${firstDue.replaceAll("-", "")}.csv`,
+      );
+      const csvText = csv.body.toString("utf8");
+      expect(csvText).toContain(`${firstDue} 至 ${firstDue}`);
+      expect(csvText).toContain("\"1\"");
+      expect(csvText).not.toContain(`\"${secondDue}\"`);
+
+      const xlsx = await admin.raw(`/classes/${classId}/export.xlsx?${query}`);
+      expect(xlsx.status).toBe(200);
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(xlsx.body as unknown as ExcelJS.Buffer);
+      const detailSheet = workbook.getWorksheet("逐课明细")!;
+      const detailRows = Array.from(
+        { length: Math.max(0, detailSheet.actualRowCount - 1) },
+        (_, index) => detailSheet.getRow(index + 2),
+      );
+      expect(detailRows).toHaveLength(3);
+      expect(detailRows.every((row) => row.getCell(6).value === 1)).toBe(true);
+      expect(workbook.getWorksheet("班级汇总")!.getCell("B2").value).toBe(`${firstDue} 至 ${firstDue}`);
+
+      expect((await admin.get(`/classes/${classId}/reports?range=custom`)).status).toBe(400);
+      expect((await admin.get(`/classes/${classId}/reports?range=custom&from=${secondDue}&to=${firstDue}`)).status).toBe(400);
+      expect((await admin.get(`/classes/${classId}/reports?range=custom&from=${firstDue}&to=${addDays(shanghaiToday(), 1)}`)).status).toBe(400);
     });
   });
 });

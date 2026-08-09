@@ -11,7 +11,7 @@
 
 ## 本机开发与验收
 
-当前 Mac 需要 Node.js 24 和 npm。本机不需要安装 Docker Desktop，也不以 GitHub 检查作为验收条件。
+当前 Mac 需要 Node.js 24、npm 和 Google Chrome。本机不需要安装 Docker Desktop，也不以 GitHub 检查作为验收条件。
 
 ```bash
 cd /Users/jingzhi/puti/class-study-manager
@@ -19,6 +19,7 @@ npm ci
 npm test
 npm run typecheck
 npm run build
+npm run test:e2e
 ```
 
 本地开发服务器：
@@ -27,7 +28,7 @@ npm run build
 npm run dev
 ```
 
-开发环境未提供管理员密码时会使用仅供本机调试的 `admin / admin12345`。不得把这个密码用于部署。项目不配置 GitHub Actions；以上检查全部在 Mac 本机完成后再提交和推送代码。
+开发环境未提供管理员密码时会使用仅供本机调试的 `admin / admin12345`。不得把这个密码用于部署。`test:e2e` 会构建应用并使用独立的临时 SQLite 数据库，在桌面和手机尺寸的 Chrome 中验证关键流程，不会读取或修改正式数据库。项目不配置 GitHub Actions；以上检查全部在 Mac 本机完成后再提交和推送代码。
 
 ## 配置与持久化
 
@@ -159,5 +160,7 @@ docker compose logs --tail=200 app backup
 ## 公网安全说明
 
 当前按需求直接提供 HTTP 公网访问。HTTP 不加密传输，登录密码、手机号、备注及会话 Cookie 都可能被链路上的第三方读取或篡改，不适合长期承载真实敏感数据。上线后应尽快在反向代理中配置 HTTPS、限制管理入口来源并保留定期离线备份；启用 HTTPS 后将 `COOKIE_SECURE` 改为 `true`。
+
+应用会为 API 设置禁止缓存和常用浏览器安全响应头；同一来源与账号在 15 分钟内连续登录失败 5 次后会临时限制继续尝试，并在成功登录或限制到期后恢复。该限制保存在应用进程内，容器重启后会清空。
 
 仓库不包含开源许可证，也不包含旧项目历史、旧数据库、备份、PDF、截图、真实密码或 GitHub Actions 工作流。

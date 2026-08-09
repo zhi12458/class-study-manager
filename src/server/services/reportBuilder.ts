@@ -3,6 +3,11 @@ import type { AttendanceFact, Metric, MetricRate, ReportRange } from "../../shar
 import { buildReportSummary, detectClassStudyRisk } from "./reports.js";
 import { freezeStartedLessons, shanghaiToday } from "./roster.js";
 
+export interface CustomReportRange {
+  from: string;
+  to: string;
+}
+
 function monthStart(today: string): string { return `${today.slice(0, 7)}-01`; }
 
 function subtractMonths(value: string, months: number): string {
@@ -20,10 +25,27 @@ function metricSummary(rate: MetricRate) {
     notRequired: rate.notRequired, rate: rate.rate };
 }
 
-function rangeDates(db: DatabaseSync, classId: number, range: ReportRange, today: string) {
+function rangeDates(
+  db: DatabaseSync,
+  classId: number,
+  range: ReportRange,
+  today: string,
+  customRange?: CustomReportRange,
+) {
   if (range === "month") return { from: monthStart(today), to: today, lessonId: null as number | null };
   if (range === "three_months") return { from: subtractMonths(today, 3), to: today, lessonId: null as number | null };
-  if (range === "history") return { from: "0001-01-01", to: today, lessonId: null as number | null };
+  if (range === "history") {
+    const first = db.prepare(
+      `select min(outline_due_date) as outlineDate, min(group_study_due_date) as groupDate,
+              min(class_study_due_date) as classDate from lessons where class_id = ?`
+    ).get(classId) as { outlineDate: string | null; groupDate: string | null; classDate: string | null };
+    const from = [first.outlineDate, first.groupDate, first.classDate].filter((value): value is string => Boolean(value)).sort()[0] ?? today;
+    return { from, to: today, lessonId: null as number | null };
+  }
+  if (range === "custom") {
+    if (!customRange) throw new Error("自定义统计必须提供开始和结束日期");
+    return { ...customRange, lessonId: null as number | null };
+  }
   const lessons = db.prepare(
     `select id, outline_due_date as outlineDueDate, class_study_due_date as classStudyDueDate
        from lessons where class_id = ? order by sequence`
@@ -33,14 +55,33 @@ function rangeDates(db: DatabaseSync, classId: number, range: ReportRange, today
     return start <= today && lesson.classStudyDueDate >= today;
   });
   const recent = current ?? [...lessons].reverse().find((lesson) => lesson.classStudyDueDate <= today) ?? null;
-  return { from: "0001-01-01", to: today, lessonId: recent?.id ?? -1 };
+  if (!recent) return { from: today, to: today, lessonId: -1 };
+  return {
+    from: [recent.outlineDueDate, recent.classStudyDueDate].sort()[0],
+    to: recent.classStudyDueDate < today ? recent.classStudyDueDate : today,
+    lessonId: recent.id,
+  };
 }
 
-export function buildClassReport(db: DatabaseSync, classId: number, range: ReportRange, today = shanghaiToday()) {
+function rangeLabel(range: ReportRange, from: string, to: string): string {
+  if (range === "recent") return "最近课次";
+  if (range === "history") return "完整历史";
+  if (range === "month") return `当月（${from} 至 ${to}）`;
+  if (range === "three_months") return `最近3个月（${from} 至 ${to}）`;
+  return `${from} 至 ${to}`;
+}
+
+export function buildClassReport(
+  db: DatabaseSync,
+  classId: number,
+  range: ReportRange,
+  today = shanghaiToday(),
+  customRange?: CustomReportRange,
+) {
   freezeStartedLessons(db, classId, today);
   const classInfo = db.prepare("select id, name from classes where id = ?").get(classId) as { id: number; name: string } | undefined;
   if (!classInfo) throw new Error("班级不存在");
-  const selected = rangeDates(db, classId, range, today);
+  const selected = rangeDates(db, classId, range, today, customRange);
   const conditions = ["l.class_id = ?"];
   const params: SQLInputValue[] = [classId];
   if (selected.lessonId !== null) { conditions.push("l.id = ?"); params.push(selected.lessonId); }
@@ -123,7 +164,7 @@ export function buildClassReport(db: DatabaseSync, classId: number, range: Repor
   ).all(classId);
 
   return {
-    range, class: { id: classInfo.id, name: classInfo.name },
+    range, rangeLabel: rangeLabel(range, selected.from, selected.to), class: { id: classInfo.id, name: classInfo.name },
     classSummary: Object.fromEntries(Object.entries(summary.classSummary).map(([metric, rate]) => [metric, metricSummary(rate)])),
     groupSummaries: summary.groupSummaries.map((group) => ({ ...group,
       metrics: Object.fromEntries(Object.entries(group.metrics).map(([metric, rate]) => [metric, metricSummary(rate)])) })),
