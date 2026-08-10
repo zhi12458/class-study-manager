@@ -7,6 +7,8 @@ export interface AuthedRequest extends Request {
   classPermission?: ClassPermission;
 }
 
+type ClassAccessScope = "read" | "manage" | "schedule";
+
 export function requireAuth(req: AuthedRequest, res: Response, next: NextFunction): void {
   if (!req.user) {
     res.status(401).json({ error: "请先登录" });
@@ -25,7 +27,7 @@ export function requireAdmin(req: AuthedRequest, res: Response, next: NextFuncti
   next();
 }
 
-export function requireClassAccess(db: DatabaseSync, manage = false) {
+function requireClassScope(db: DatabaseSync, scope: ClassAccessScope) {
   return (req: AuthedRequest, res: Response, next: NextFunction): void => {
     if (!req.user) return void res.status(401).json({ error: "请先登录" });
     const classId = Number(req.params.classId);
@@ -40,8 +42,17 @@ export function requireClassAccess(db: DatabaseSync, manage = false) {
       return;
     }
     const monitor = db.prepare("select 1 from class_monitors where class_id = ? and user_id = ?").get(classId, req.user.id);
-    if (!monitor || manage || classRow.archived) return void res.status(403).json({ error: "无权访问该班级" });
+    if (!monitor || scope === "manage" || classRow.archived) return void res.status(403).json({ error: "无权访问该班级" });
     req.classPermission = "monitor";
     next();
   };
+}
+
+export function requireClassAccess(db: DatabaseSync, manage = false) {
+  return requireClassScope(db, manage ? "manage" : "read");
+}
+
+/** Allows the current class monitor to manage schedule resources without granting broader class management. */
+export function requireClassScheduleAccess(db: DatabaseSync) {
+  return requireClassScope(db, "schedule");
 }

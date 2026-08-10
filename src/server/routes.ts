@@ -10,7 +10,7 @@ import {
   type EnrollmentRole, type EnrollmentStatus, type Metric, type ReportRange
 } from "../shared/types.js";
 import { normalizePhone } from "../shared/phone.js";
-import { type AuthedRequest, requireAdmin, requireAuth, requireClassAccess } from "./access.js";
+import { type AuthedRequest, requireAdmin, requireAuth, requireClassAccess, requireClassScheduleAccess } from "./access.js";
 import {
   createPasswordHash, createSession, deleteSession, generateTemporaryPassword,
   listClassAccesses, loadSessionUser, verifyPassword
@@ -1039,7 +1039,7 @@ export function createApiRouter(db: DatabaseSync) {
     res.json({ lessons, breaks });
   });
 
-  router.post("/classes/:classId/schedule/generate", requireAuth, requireClassAccess(db, true), (req, res) => {
+  router.post("/classes/:classId/schedule/generate", requireAuth, requireClassScheduleAccess(db), (req, res) => {
     const classId = numberParam(req.params.classId);
     const firstDueDate = req.body.firstDueDate ?? req.body.firstClassStudyDueDate;
     const cadenceMode = req.body.cadenceMode === undefined ? undefined : String(req.body.cadenceMode) as CadenceMode;
@@ -1057,12 +1057,12 @@ export function createApiRouter(db: DatabaseSync) {
     res.json({ generatedCount });
   });
 
-  router.post("/classes/:classId/lessons/append", requireAuth, requireClassAccess(db, true), (req, res) => {
+  router.post("/classes/:classId/lessons/append", requireAuth, requireClassScheduleAccess(db), (req, res) => {
     const classId = numberParam(req.params.classId); const generatedCount = appendLessons(db, classId, Number(req.body.count ?? 24));
     res.json({ generatedCount });
   });
 
-  router.post("/classes/:classId/schedule/rebuild-future", requireAuth, requireClassAccess(db, true), (req, res) => {
+  router.post("/classes/:classId/schedule/rebuild-future", requireAuth, requireClassScheduleAccess(db), (req, res) => {
     const classId = numberParam(req.params.classId);
     const cadenceMode = String(req.body.cadenceMode ?? "") as CadenceMode;
     if (!CADENCE_MODES.includes(cadenceMode)) return void res.status(400).json({ error: "学习模式无效" });
@@ -1084,7 +1084,7 @@ export function createApiRouter(db: DatabaseSync) {
     res.json(result);
   });
 
-  router.post("/classes/:classId/lessons/insert", requireAuth, requireClassAccess(db, true), (req, res) => {
+  router.post("/classes/:classId/lessons/insert", requireAuth, requireClassScheduleAccess(db), (req, res) => {
     const classId = numberParam(req.params.classId);
     const lessonType = String(req.body.lessonType ?? "regular");
     if (!LESSON_TYPES.includes(lessonType as typeof LESSON_TYPES[number])) return void res.status(400).json({ error: "课次类型无效" });
@@ -1101,16 +1101,17 @@ export function createApiRouter(db: DatabaseSync) {
     res.json(result);
   });
 
-  router.patch("/classes/:classId/lessons/:lessonId", requireAuth, requireClassAccess(db, true), (req, res) => {
+  router.patch("/classes/:classId/lessons/:lessonId", requireAuth, requireClassScheduleAccess(db), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId); const lessonId = numberParam(req.params.lessonId);
     const lessonType = req.body.lessonType === undefined ? undefined : String(req.body.lessonType);
     if (lessonType && !LESSON_TYPES.includes(lessonType as typeof LESSON_TYPES[number])) return void res.status(400).json({ error: "课次类型无效" });
     patchLesson(db, classId, lessonId, { title: req.body.title, lessonType: lessonType as typeof LESSON_TYPES[number] | undefined,
-      classStudyDueDate: req.body.classStudyDueDate ? validDate(req.body.classStudyDueDate) : undefined });
+      classStudyDueDate: req.body.classStudyDueDate ? validDate(req.body.classStudyDueDate) : undefined },
+    { futureOnly: req.classPermission === "monitor" });
     res.json({ ok: true });
   });
 
-  router.post("/classes/:classId/breaks", requireAuth, requireClassAccess(db, true), (req: AuthedRequest, res) => {
+  router.post("/classes/:classId/breaks", requireAuth, requireClassScheduleAccess(db), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId);
     addScheduleBreak(db, classId, validDate(req.body.startDate ?? req.body.date), Number(req.body.weeks ?? 1), String(req.body.reason ?? "放假/暂停"), req.user!.id);
     res.json({ ok: true });

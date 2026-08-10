@@ -15,6 +15,7 @@ process.env.ADMIN_PASSWORD = "E2eAdmin!2026";
 process.env.COOKIE_SECURE = "false";
 
 const { openDatabase } = await import("../../dist/server/db.js");
+const { createPasswordHash } = await import("../../dist/server/auth.js");
 const { createClass } = await import("../../dist/server/services/classes.js");
 const { shanghaiToday } = await import("../../dist/server/services/roster.js");
 
@@ -42,6 +43,13 @@ const enrollmentId = Number(db.prepare(
 db.prepare(
   "insert into group_assignments (enrollment_id, group_id, effective_from_sequence) values (?, ?, 1)",
 ).run(enrollmentId, groups[0].id);
+const monitorUserId = Number(db.prepare(
+  `insert into users (person_id, username, password_hash, display_name, must_change_password)
+   values (?, 'monitor-e2e', ?, '测试班长', 0)`,
+).run(personId, createPasswordHash("E2eMonitor!2026")).lastInsertRowid);
+db.prepare(
+  "insert into class_monitors (class_id, enrollment_id, user_id, assigned_by) values (?, ?, ?, ?)",
+).run(classId, enrollmentId, monitorUserId, admin.id);
 
 const today = shanghaiToday();
 const dueDates = [addDays(today, -14), addDays(today, -7), addDays(today, 7)];

@@ -370,11 +370,12 @@ export function updateFutureCadence(
 
 export function patchLesson(db: DatabaseSync, classId: number, lessonId: number, patch: {
   title?: string; lessonType?: LessonType; classStudyDueDate?: string;
-}): void {
+}, options: { futureOnly?: boolean } = {}): void {
   freezeStartedLessons(db, classId);
   const rows = lessonRows(db, classId);
   const target = rows.find((lesson) => lesson.id === lessonId);
   if (!target) throw new Error("课次不存在");
+  if (options.futureOnly && target.frozenAt) throw new Error("班长只能编辑尚未开始的课次");
   if (target.frozenAt && (patch.lessonType || patch.classStudyDueDate)) throw new Error("已开始课次不能修改类型或日期");
   db.exec("begin immediate");
   try {

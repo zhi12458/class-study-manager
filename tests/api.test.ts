@@ -8,6 +8,10 @@ import { openDatabase } from "../src/server/db.js";
 import { createApiRouter } from "../src/server/routes.js";
 import { shanghaiToday } from "../src/server/services/roster.js";
 
+function addDays(date: string, days: number): string {
+  return new Date(new Date(`${date}T00:00:00.000Z`).getTime() + days * 86_400_000).toISOString().slice(0, 10);
+}
+
 interface ApiResponse<T = Record<string, unknown>> {
   status: number;
   body: T;
@@ -116,7 +120,7 @@ describe.sequential("API lifecycle and class isolation", () => {
     else process.env.ADMIN_PASSWORD = previousAdminPassword;
   });
 
-  it("logs in as admin and creates phone counselors, a default-three-group class, roster, schedule, and monitor", async () => {
+  it("logs in as admin and creates phone counselors, a default-three-group class, roster, and monitor", async () => {
     const login = await admin.post("/auth/login", { identifier: "admin", password: "admin12345" });
     expect(login.status).toBe(200);
 
@@ -170,20 +174,6 @@ describe.sequential("API lifecycle and class isolation", () => {
     });
     secondStudentId = await addStudent("第二学员", "13900139002");
     thirdStudentId = await addStudent("待登记学员", "13900139003");
-
-    const generated = await admin.post<{ generatedCount: number }>(`/classes/${classId}/schedule/generate`, {
-      firstDueDate: shanghaiToday(),
-      count: 2,
-    });
-    expect(generated.status).toBe(200);
-    expect(generated.body.generatedCount).toBe(2);
-
-    const lessons = await admin.get<{ lessons: Array<{ id: number; sequence: number }> }>(
-      `/classes/${classId}/lessons`,
-    );
-    expect(lessons.status).toBe(200);
-    expect(lessons.body.lessons).toHaveLength(2);
-    firstLessonId = lessons.body.lessons[0].id;
 
     const assignedMonitor = await admin.put<{
       temporaryPassword: string; phone: string;
@@ -253,6 +243,20 @@ describe.sequential("API lifecycle and class isolation", () => {
     });
     expect(changed.status).toBe(200);
 
+    const generated = await monitor.post<{ generatedCount: number }>(`/classes/${classId}/schedule/generate`, {
+      firstDueDate: shanghaiToday(),
+      count: 2,
+      cadenceMode: "same_week",
+      seriesKey: "wisdom_life",
+      startPosition: 1,
+      round: 1,
+    });
+    expect(generated.status).toBe(200);
+    expect(generated.body.generatedCount).toBe(2);
+    const lessons = await monitor.get<{ lessons: Array<{ id: number; sequence: number }> }>(`/classes/${classId}/lessons`);
+    expect(lessons.body.lessons).toHaveLength(2);
+    firstLessonId = lessons.body.lessons[0].id;
+
     const attendance = await monitor.get<{
       rows: Array<Record<string, unknown>>;
       canEdit: boolean;
@@ -306,6 +310,74 @@ describe.sequential("API lifecycle and class isolation", () => {
     );
   });
 
+  it("lets the monitor manage the future schedule without changing started lessons", async () => {
+    const before = await monitor.get<{
+      lessons: Array<{
+        id: number; lessonNumber: number; title: string; lessonType: string;
+        classStudyDueDate: string; started: boolean;
+      }>;
+    }>(`/classes/${classId}/lessons`);
+    expect(before.status).toBe(200);
+    const startedLesson = before.body.lessons.find((lesson) => lesson.started)!;
+    const futureLesson = before.body.lessons.find((lesson) => !lesson.started)!;
+
+    const deniedStartedEdit = await monitor.patch<{ error: string }>(
+      `/classes/${classId}/lessons/${startedLesson.id}`,
+      { title: "班长不应修改的历史课名" },
+    );
+    expect(deniedStartedEdit.status).toBe(400);
+    expect(deniedStartedEdit.body.error).toContain("班长只能编辑尚未开始的课次");
+
+    expect((await monitor.patch(`/classes/${classId}/lessons/${futureLesson.id}`, {
+      title: "班长编辑的未来课",
+      lessonType: futureLesson.lessonType,
+      classStudyDueDate: futureLesson.classStudyDueDate,
+    })).status).toBe(200);
+    expect((await monitor.post<{ generatedCount: number }>(`/classes/${classId}/lessons/append`, { count: 1 })).status).toBe(200);
+
+    const inserted = await monitor.post<{ lessonId: number }>(`/classes/${classId}/lessons/insert`, {
+      beforeLessonId: futureLesson.id,
+      title: "班长插入的未来课",
+      lessonType: "regular",
+      classStudyDueDate: futureLesson.classStudyDueDate,
+    });
+    expect(inserted.status).toBe(200);
+
+    const breakDate = addDays(futureLesson.classStudyDueDate, 7);
+    expect((await monitor.post(`/classes/${classId}/breaks`, {
+      date: breakDate,
+      reason: "班长安排的暂停周",
+    })).status).toBe(200);
+
+    const beforeRebuild = await monitor.get<{
+      lessons: Array<{ id: number; classStudyDueDate: string; started: boolean }>;
+    }>(`/classes/${classId}/lessons`);
+    const firstFuture = beforeRebuild.body.lessons.find((lesson) => !lesson.started)!;
+    const rebuilt = await monitor.post<{
+      preservedCount: number; replacedCount: number; generatedCount: number;
+    }>(`/classes/${classId}/schedule/rebuild-future`, {
+      firstClassStudyDueDate: firstFuture.classStudyDueDate,
+      count: 2,
+      cadenceMode: "same_week",
+      seriesKey: "wisdom_life",
+      startPosition: 3,
+      round: 1,
+    });
+    expect(rebuilt.status).toBe(200);
+    expect(rebuilt.body).toMatchObject({ preservedCount: 1, generatedCount: 2 });
+
+    const after = await monitor.get<{
+      lessons: Array<{ id: number; title: string; started: boolean }>;
+    }>(`/classes/${classId}/lessons`);
+    expect(after.body.lessons).toHaveLength(3);
+    expect(after.body.lessons[0]).toMatchObject({ id: startedLesson.id, started: true });
+
+    expect((await monitor.patch(`/classes/${classId}`, { name: "班长不能改班名" })).status).toBe(403);
+    expect((await monitor.post(`/classes/${classId}/groups`, { name: "班长不能建组" })).status).toBe(403);
+    expect((await monitor.post(`/classes/${classId}/students`, { name: "班长不能建学员" })).status).toBe(403);
+    expect((await monitor.post("/admin/course-catalog/sync")).status).toBe(403);
+  });
+
   it("rejects cross-class access for monitor and unrelated counselor", async () => {
     const monitorIdentity = await monitor.get<{
       user: { isAdmin: boolean; canCounsel: boolean; phone: string };
@@ -318,6 +390,7 @@ describe.sequential("API lifecycle and class isolation", () => {
 
     const monitorCrossClass = await monitor.get(`/classes/${otherClassId}/lessons`);
     expect(monitorCrossClass.status).toBe(403);
+    expect((await monitor.post(`/classes/${otherClassId}/lessons/append`, { count: 1 })).status).toBe(403);
 
     const counselorCrossClass = await counselorA.get(`/classes/${otherClassId}/lessons`);
     expect(counselorCrossClass.status).toBe(403);
@@ -366,5 +439,11 @@ describe.sequential("API lifecycle and class isolation", () => {
     expect(newCounselorChanged.status).toBe(200);
     const newCounselorAccess = await counselorB.get(`/classes/${classId}/lessons`);
     expect(newCounselorAccess.status).toBe(200);
+  });
+
+  it("removes the monitor's schedule access when the class is archived", async () => {
+    expect((await admin.patch(`/classes/${classId}`, { archived: true })).status).toBe(200);
+    const denied = await monitor.post(`/classes/${classId}/lessons/append`, { count: 1 });
+    expect([401, 403]).toContain(denied.status);
   });
 });

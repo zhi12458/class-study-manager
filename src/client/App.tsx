@@ -478,7 +478,7 @@ function AppShell({ user, classes, currentClass, onSelectClass, onLogout, childr
     { path: "/attendance", label: "考勤登记", icon: ClipboardCheck, needsClass: true },
     { path: "/students", label: "学员名单", icon: Users, needsClass: true, manager: true },
     { path: "/groups", label: "小组管理", icon: GraduationCap, needsClass: true, manager: true },
-    { path: "/lessons", label: "课表安排", icon: CalendarDays, needsClass: true, manager: true },
+    { path: "/lessons", label: "课表安排", icon: CalendarDays, needsClass: true },
     { path: "/reports", label: "完成统计", icon: BarChart3, needsClass: true },
     { path: "/settings", label: "班级设置", icon: Settings, needsClass: true, manager: true },
     { path: "/classes", label: "全部班级", icon: BookOpenCheck, needsClass: false },
@@ -1986,7 +1986,7 @@ function AppContent() {
   else if (path === "/reports") content = <ReportsPage currentClass={currentClass!} canExport={manager} />;
   else if (path === "/students" && manager) content = <StudentsPage currentClass={currentClass!} />;
   else if (path === "/groups" && manager) content = <GroupsPage currentClass={currentClass!} onClassRefresh={() => loadClasses()} />;
-  else if (path === "/lessons" && manager) content = <LessonsPage currentClass={currentClass!} isAdmin={user.isAdmin} onClassRefresh={() => loadClasses()} />;
+  else if (path === "/lessons") content = <LessonsPage currentClass={currentClass!} isAdmin={user.isAdmin} onClassRefresh={() => loadClasses()} />;
   else if (path === "/settings" && manager) content = <SettingsPage user={user} currentClass={currentClass!} onRefresh={() => loadClasses()} />;
   else content = <OverviewPage currentClass={currentClass!} />;
 

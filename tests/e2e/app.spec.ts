@@ -1,9 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 
-async function login(page: Page): Promise<void> {
+async function login(page: Page, identifier = "admin", password = "E2eAdmin!2026"): Promise<void> {
   await page.goto("/");
-  await page.getByLabel("账号或手机号").fill("admin");
-  await page.getByLabel("密码").fill("E2eAdmin!2026");
+  await page.getByLabel("账号或手机号").fill(identifier);
+  await page.getByLabel("密码").fill(password);
   await page.getByRole("button", { name: /^登录/ }).click();
   await expect(page.getByRole("heading", { name: /浏览器回归测试班/ })).toBeVisible();
 }
@@ -12,6 +12,12 @@ async function navigate(page: Page, label: string): Promise<void> {
   const menu = page.getByRole("button", { name: "打开菜单" });
   if (await menu.isVisible()) await menu.click();
   await page.getByRole("button", { name: label, exact: true }).click();
+}
+
+async function logout(page: Page): Promise<void> {
+  const menu = page.getByRole("button", { name: "打开菜单" });
+  if (await menu.isVisible()) await menu.click();
+  await page.getByRole("button", { name: "退出登录" }).click();
 }
 
 test.beforeEach(async ({ page }) => {
@@ -83,6 +89,34 @@ test("主要管理页面和考勤保存流程可操作", async ({ page }, testIn
   await expect(page.getByRole("button", { name: "Excel 导入" })).toBeVisible();
   await navigate(page, "班级设置");
   await expect(page.getByLabel("选择班长")).toBeVisible();
+});
+
+test("班长可管理未来课表但看不到其他班级管理入口", async ({ page }) => {
+  await logout(page);
+  await login(page, "monitor-e2e", "E2eMonitor!2026");
+
+  await expect(page.getByRole("button", { name: "学员名单", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "小组管理", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "班级设置", exact: true })).toHaveCount(0);
+  await navigate(page, "课表安排");
+
+  await expect(page.getByRole("button", { name: "放假 / 暂停周" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "插入课次" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "重新生成未来课表" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "追加课次" })).toBeVisible();
+
+  await page.getByRole("button", { name: "编辑第 3 个课次" }).click();
+  const dialog = page.getByRole("dialog", { name: "编辑第 3 个课次" });
+  await dialog.getByLabel("课次名称").fill("班长更新的未来课");
+  const saveResponse = page.waitForResponse((response) => response.request().method() === "PATCH" && response.url().includes("/lessons/"));
+  await dialog.getByRole("button", { name: "保存修改并顺延" }).click();
+  expect((await saveResponse).status()).toBe(200);
+  await expect(page.getByText("班长更新的未来课", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "重新生成未来课表" }).click();
+  const rebuild = page.getByRole("dialog", { name: "重新生成未来课表" });
+  await expect(rebuild.getByRole("button", { name: "刷新目录" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
 });
 
 test("手机菜单公开正确状态并可用Escape关闭", async ({ page }, testInfo) => {
