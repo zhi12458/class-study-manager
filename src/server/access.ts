@@ -7,7 +7,7 @@ export interface AuthedRequest extends Request {
   classPermission?: ClassPermission;
 }
 
-type ClassAccessScope = "read" | "manage" | "schedule";
+type ClassAccessScope = "read" | "manage" | "schedule" | "attendance" | "report";
 
 export function requireAuth(req: AuthedRequest, res: Response, next: NextFunction): void {
   if (!req.user) {
@@ -42,9 +42,20 @@ function requireClassScope(db: DatabaseSync, scope: ClassAccessScope) {
       return;
     }
     const monitor = db.prepare("select 1 from class_monitors where class_id = ? and user_id = ?").get(classId, req.user.id);
-    if (!monitor || scope === "manage" || classRow.archived) return void res.status(403).json({ error: "无权访问该班级" });
-    req.classPermission = "monitor";
-    next();
+    if (monitor && scope !== "manage" && !classRow.archived) {
+      req.classPermission = "monitor";
+      next();
+      return;
+    }
+    const attendanceAssistant = (scope === "attendance" || scope === "report") && db.prepare(
+      "select 1 from class_attendance_assistants where class_id = ? and user_id = ?"
+    ).get(classId, req.user.id);
+    if (attendanceAssistant && !classRow.archived) {
+      req.classPermission = "attendance_assistant";
+      next();
+      return;
+    }
+    return void res.status(403).json({ error: "无权访问该班级" });
   };
 }
 
@@ -55,4 +66,14 @@ export function requireClassAccess(db: DatabaseSync, manage = false) {
 /** Allows the current class monitor to manage schedule resources without granting broader class management. */
 export function requireClassScheduleAccess(db: DatabaseSync) {
   return requireClassScope(db, "schedule");
+}
+
+/** Allows counselors, monitors and attendance assistants to read/write attendance resources. */
+export function requireClassAttendanceAccess(db: DatabaseSync) {
+  return requireClassScope(db, "attendance");
+}
+
+/** Allows counselors, monitors and attendance assistants to view statistics without enabling exports. */
+export function requireClassReportAccess(db: DatabaseSync) {
+  return requireClassScope(db, "report");
 }

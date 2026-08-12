@@ -22,9 +22,9 @@ export type ReportRange = (typeof REPORT_RANGES)[number];
 
 export const ENROLLMENT_STATUSES = ["normal", "leave", "withdrawn"] as const;
 export type EnrollmentStatus = (typeof ENROLLMENT_STATUSES)[number];
-export type EnrollmentRole = "monitor" | "group_leader" | "charity" | "dharma_light" | "communications" | "student";
+export type EnrollmentRole = "monitor" | "attendance_assistant" | "group_leader" | "charity" | "dharma_light" | "communications" | "student";
 
-export type ClassPermission = "counselor" | "monitor";
+export type ClassPermission = "counselor" | "monitor" | "attendance_assistant";
 
 export interface ClassAccess {
   classId: number;

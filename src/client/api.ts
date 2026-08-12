@@ -1,4 +1,4 @@
-export type ClassPermission = "counselor" | "monitor";
+export type ClassPermission = "counselor" | "monitor" | "attendance_assistant";
 export type CadenceMode = "same_week" | "parallel_two_week";
 export type LessonType = "regular" | "review";
 export type Metric = "outline" | "group_study" | "class_study";
@@ -7,7 +7,16 @@ export type GroupStudyStatus = "present" | "absent";
 export type ClassStudyStatus = "onsite" | "online" | "makeup" | "share" | "absent";
 export type ReportRange = "recent" | "month" | "three_months" | "history" | "custom";
 export type EnrollmentStatus = "normal" | "leave" | "withdrawn";
-export type EnrollmentRole = "monitor" | "group_leader" | "charity" | "dharma_light" | "communications" | "student";
+export type EnrollmentRole = "monitor" | "attendance_assistant" | "group_leader" | "charity" | "dharma_light" | "communications" | "student";
+
+export interface AttendanceAssistant {
+  enrollmentId: number;
+  userId: number;
+  name: string;
+  dharmaName?: string | null;
+  phone?: string | null;
+  username: string;
+}
 
 export interface ClassAccess {
   classId: number;
@@ -42,6 +51,7 @@ export interface Counselor {
   activeClassCount?: number;
   archivedClassCount?: number;
   monitorClassCount?: number;
+  attendanceAssistantClassCount?: number;
   deletable?: boolean;
 }
 

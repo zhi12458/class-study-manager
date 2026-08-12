@@ -71,7 +71,7 @@ test("主要管理页面和考勤保存流程可操作", async ({ page }, testIn
   await page.getByRole("combobox", { name: "导图/提纲", exact: true }).selectOption(mobile ? "no" : "yes");
   await page.getByRole("combobox", { name: "组修", exact: true }).selectOption(mobile ? "absent" : "present");
   await page.getByRole("combobox", { name: "班修", exact: true }).selectOption(mobile ? "share" : "onsite");
-  await page.getByRole("button", { name: /应用到 1 人/ }).click();
+  await page.getByRole("button", { name: /应用到 \d+ 人/ }).click();
   const saveAttendance = page.getByRole("button", { name: "保存本课考勤" });
   await expect(saveAttendance).toBeEnabled();
   page.once("dialog", (dialog) => dialog.accept());
@@ -117,6 +117,26 @@ test("班长可管理未来课表但看不到其他班级管理入口", async ({
   const rebuild = page.getByRole("dialog", { name: "重新生成未来课表" });
   await expect(rebuild.getByRole("button", { name: "刷新目录" })).toHaveCount(0);
   await page.keyboard.press("Escape");
+});
+
+test("考勤员只能进入考勤和统计，不能打开课表、名册、设置或导出", async ({ page }) => {
+  await logout(page);
+  await login(page, "attendance-e2e", "E2eAttendance!2026");
+
+  await expect(page.locator(".topbar-right .role-badge")).toHaveText("考勤员");
+  for (const hidden of ["学员名单", "小组管理", "课表安排", "班级设置"]) {
+    await expect(page.getByRole("button", { name: hidden, exact: true })).toHaveCount(0);
+  }
+
+  await navigate(page, "完成统计");
+  await expect(page.getByRole("link", { name: "Excel" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "CSV" })).toHaveCount(0);
+  await navigate(page, "考勤登记");
+  await expect(page.getByRole("heading", { name: "批量填写" })).toBeVisible();
+
+  await page.goto("/lessons");
+  await expect(page.getByRole("heading", { name: /浏览器回归测试班/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "课表安排" })).toHaveCount(0);
 });
 
 test("手机菜单公开正确状态并可用Escape关闭", async ({ page }, testInfo) => {

@@ -47,6 +47,7 @@ import {
   asList,
   exportUrl,
   normalizeMe,
+  type AttendanceAssistant,
   type AttendancePayload,
   type AttendanceRow,
   type CadenceMode,
@@ -99,7 +100,7 @@ const CLASS_OPTIONS: Array<{ value: ClassStudyStatus; label: string }> = [
 ];
 const ENROLLMENT_STATUS_LABELS: Record<EnrollmentStatus, string> = { normal: "正常", leave: "休学", withdrawn: "退学" };
 const ENROLLMENT_ROLE_LABELS: Record<EnrollmentRole, string> = {
-  monitor: "班长", group_leader: "组长", charity: "慈善", dharma_light: "传灯",
+  monitor: "班长", attendance_assistant: "考勤员", group_leader: "组长", charity: "慈善", dharma_light: "传灯",
   communications: "文宣", student: "学员"
 };
 const EDITABLE_ROLE_OPTIONS: Array<{ value: EnrollmentRole; label: string }> = [
@@ -118,6 +119,22 @@ function useNavigation() {
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : "操作失败，请稍后重试";
+}
+
+function classPermissionLabel(permission: ClassSummary["permission"], isAdmin = false) {
+  if (isAdmin || permission === "admin") return "管理员";
+  if (permission === "counselor") return "辅导员";
+  if (permission === "attendance_assistant") return "考勤员";
+  return "班长";
+}
+
+function accountIdentityLabel(user: CurrentUser) {
+  if (user.isAdmin) return "系统管理员";
+  const identities = new Set<string>();
+  if (user.canCounsel || user.classAccesses.some((item) => item.permission === "counselor")) identities.add("辅导员");
+  if (user.classAccesses.some((item) => item.permission === "monitor")) identities.add("班长");
+  if (user.classAccesses.some((item) => item.permission === "attendance_assistant")) identities.add("考勤员");
+  return [...identities].join("、") || "普通账号";
 }
 
 function dateOnly(value: unknown) {
@@ -391,7 +408,7 @@ function LoginPage({ onLogin }: { onLogin: (user: CurrentUser) => void }) {
         <div>
           <span className="eyebrow">WELCOME BACK</span>
           <h2>登录班级共修管理系统</h2>
-          <p>管理员使用账号；辅导员和班长可使用手机号或分配的拼音账号登录。</p>
+          <p>管理员使用账号；辅导员、班长和考勤员可使用手机号或分配的拼音账号登录。</p>
         </div>
         <form className="form-stack" onSubmit={submit}>
           <label>
@@ -473,17 +490,18 @@ function AppShell({ user, classes, currentClass, onSelectClass, onLogout, childr
   const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
   const mobileCloseButtonRef = useRef<HTMLButtonElement>(null);
   const manager = user.isAdmin || currentClass?.permission === "counselor";
+  const attendanceAssistant = currentClass?.permission === "attendance_assistant";
   const navItems = [
     { path: "/overview", label: "班级总览", icon: LayoutDashboard, needsClass: true },
     { path: "/attendance", label: "考勤登记", icon: ClipboardCheck, needsClass: true },
     { path: "/students", label: "学员名单", icon: Users, needsClass: true, manager: true },
     { path: "/groups", label: "小组管理", icon: GraduationCap, needsClass: true, manager: true },
-    { path: "/lessons", label: "课表安排", icon: CalendarDays, needsClass: true },
+    { path: "/lessons", label: "课表安排", icon: CalendarDays, needsClass: true, schedule: true },
     { path: "/reports", label: "完成统计", icon: BarChart3, needsClass: true },
     { path: "/settings", label: "班级设置", icon: Settings, needsClass: true, manager: true },
     { path: "/classes", label: "全部班级", icon: BookOpenCheck, needsClass: false },
     { path: "/profile", label: "我的资料", icon: UserRound, needsClass: false }
-  ].filter((item) => !item.manager || manager);
+  ].filter((item) => (!item.manager || manager) && (!item.schedule || !attendanceAssistant));
 
   const closeMobileMenu = useCallback((restoreFocus = true) => {
     setMobileOpen(false);
@@ -527,7 +545,7 @@ function AppShell({ user, classes, currentClass, onSelectClass, onLogout, childr
         </nav>
         <div className="sidebar-foot">
           <div className="avatar">{user.displayName.slice(0, 1)}</div>
-          <div className="user-meta"><strong>{user.displayName}</strong><span>{user.isAdmin ? "系统管理员" : currentClass?.permission === "counselor" ? "辅导员" : "班长"}</span></div>
+          <div className="user-meta"><strong>{user.displayName}</strong><span>{currentClass ? classPermissionLabel(currentClass.permission, user.isAdmin) : accountIdentityLabel(user)}</span></div>
           <button className="icon-button dark" onClick={onLogout} title="退出登录"><LogOut size={18} /></button>
         </div>
       </aside>
@@ -546,7 +564,7 @@ function AppShell({ user, classes, currentClass, onSelectClass, onLogout, childr
             ) : <strong>还没有班级</strong>}
           </div>
           <div className="topbar-right">
-            {currentClass && <span className={`role-badge ${currentClass.permission ?? (user.isAdmin ? "admin" : "")}`}>{user.isAdmin ? "管理员" : currentClass.permission === "counselor" ? "辅导员" : "班长"}</span>}
+            {currentClass && <span className={`role-badge ${currentClass.permission ?? (user.isAdmin ? "admin" : "")}`}>{classPermissionLabel(currentClass.permission, user.isAdmin)}</span>}
             <div className="top-avatar">{user.displayName.slice(0, 1)}</div>
           </div>
         </header>
@@ -603,7 +621,7 @@ function ProfilePage({ user, onUpdated }: { user: CurrentUser; onUpdated: (user:
       </form>
       <section className="panel form-stack">
         <div className="panel-head"><div><h2>账号安全</h2><p>手机号全系统唯一，防止人员资料和登录账号混淆。</p></div><ShieldCheck size={20} /></div>
-        <dl className="profile-facts"><div><dt>登录账号</dt><dd>{user.isAdmin ? "admin" : user.username || "—"}</dd></div><div><dt>当前身份</dt><dd>{user.isAdmin ? "系统管理员" : user.canCounsel ? "辅导员（可兼任班长）" : "班长"}</dd></div></dl>
+        <dl className="profile-facts"><div><dt>登录账号</dt><dd>{user.isAdmin ? "admin" : user.username || "—"}</dd></div><div><dt>账号身份</dt><dd>{accountIdentityLabel(user)}</dd></div></dl>
         <div className="permission-note"><strong>账号与资料分开</strong><span>{user.isAdmin ? "联系电话会更新，但仍使用 admin 登录。" : "法名变化不会自动改变登录账号；修改登录账号必须输入当前密码。"}</span></div>
       </section>
     </div>
@@ -652,7 +670,9 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
         active: raw.active == null ? true : Boolean(raw.active),
         accountActive: raw.accountActive == null ? undefined : Boolean(raw.accountActive),
         activeClassCount: Number(raw.activeClassCount ?? 0), archivedClassCount: Number(raw.archivedClassCount ?? 0),
-        monitorClassCount: Number(raw.monitorClassCount ?? 0), deletable: Boolean(raw.deletable)
+        monitorClassCount: Number(raw.monitorClassCount ?? 0),
+        attendanceAssistantClassCount: Number(raw.attendanceAssistantClassCount ?? 0),
+        deletable: Boolean(raw.deletable)
       })));
     } catch (error) {
       setNotice({ tone: "error", text: errorText(error) });
@@ -732,7 +752,7 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
 
   async function setClassStopped(item: ClassSummary, stopped: boolean) {
     const action = stopped ? "停用" : "恢复";
-    if (!window.confirm(`确定${action}班级“${item.name}”吗？${stopped ? "班长将立即停止访问，历史数据会保留。" : "班级将恢复日常使用。"}`)) return;
+    if (!window.confirm(`确定${action}班级“${item.name}”吗？${stopped ? "班长和考勤员将立即停止访问，历史数据会保留。" : "班级将恢复日常使用。"}`)) return;
     setLoading(true);
     try {
       await apiJson(`/api/classes/${item.id}`, { method: "PATCH", body: JSON.stringify({ archived: stopped }) });
@@ -781,7 +801,7 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
             <article className={`class-card ${item.archived ? "stopped" : ""}`} key={item.id}>
               <div className="class-card-illustration"><CloudSun size={30} /><span className={`class-status ${item.archived ? "stopped" : "normal"}`}>{item.archived ? "已停用" : "正常"}</span></div>
               <div className="class-card-body">
-                <div className="card-title-row"><h2>{item.name}</h2><span className="soft-badge">{item.permission === "monitor" ? "班长" : item.permission === "counselor" ? "辅导员" : "管理员"}</span></div>
+                <div className="card-title-row"><h2>{item.name}</h2><span className="soft-badge">{classPermissionLabel(item.permission, user.isAdmin)}</span></div>
                 <p>辅导员：{item.counselorName || "待设置"}</p>
                 {item.meetingTime && <p>共修时间：{item.meetingTime}</p>}
                 <div className="class-facts"><span><Users size={15} /> {item.studentCount ?? 0} 位在班学员</span><span><UserCog size={15} /> 班长：{item.monitorName || "未设置"}</span></div>
@@ -819,7 +839,7 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
           {counselors.length === 0 ? <EmptyState title="还没有辅导员账号" detail="请先创建辅导员。" /> : <><div className="table-wrap counselor-table desktop-table"><table><thead><tr><th>辅导员</th><th>负责班级</th><th>其他身份</th><th>状态</th><th aria-label="操作" /></tr></thead><tbody>{counselors.map((counselor) => <tr key={counselor.id}>
             <td><div className="person-cell"><div className="mini-avatar">{counselor.displayName.slice(0, 1)}</div><span><strong>{counselor.displayName}</strong><small>{counselor.phone || "无手机号"} · {counselor.username}</small></span></div></td>
             <td><strong>{counselor.activeClassCount ?? 0}</strong> 个进行中<small className="cell-note">{counselor.archivedClassCount ? `${counselor.archivedClassCount} 个已归档` : "无已归档班级"}</small></td>
-            <td>{counselor.monitorClassCount ? <span className="soft-badge">兼任班长</span> : "—"}</td>
+            <td>{counselor.monitorClassCount || counselor.attendanceAssistantClassCount ? <div className="badge-row">{Boolean(counselor.monitorClassCount) && <span className="soft-badge">兼任班长</span>}{Boolean(counselor.attendanceAssistantClassCount) && <span className="soft-badge">兼任考勤员</span>}</div> : "—"}</td>
             <td><span className={`state-dot ${counselor.active === false ? "inactive" : ""}`}>{counselor.active === false ? "已停用" : "正常"}</span></td>
             <td><div className="row-actions">
               <button className="secondary compact" onClick={() => setEditingCounselor(counselor)} disabled={loading}>编辑资料</button>
@@ -828,10 +848,10 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
             </div></td>
           </tr>)}</tbody></table></div><div className="mobile-card-list">{counselors.map((counselor) => <article className="student-card" key={counselor.id}>
             <div className="person-cell"><div className="mini-avatar large">{counselor.displayName.slice(0, 1)}</div><span><strong>{counselor.displayName}</strong><small>{counselor.phone || "无手机号"} · {counselor.username}</small></span><span className={`state-dot ${counselor.active === false ? "inactive" : ""}`}>{counselor.active === false ? "已停用" : "正常"}</span></div>
-            <dl><div><dt>负责班级</dt><dd>{counselor.activeClassCount ?? 0} 个进行中{counselor.archivedClassCount ? ` · ${counselor.archivedClassCount} 个已归档` : ""}</dd></div><div><dt>其他身份</dt><dd>{counselor.monitorClassCount ? "兼任班长" : "—"}</dd></div></dl>
+            <dl><div><dt>负责班级</dt><dd>{counselor.activeClassCount ?? 0} 个进行中{counselor.archivedClassCount ? ` · ${counselor.archivedClassCount} 个已归档` : ""}</dd></div><div><dt>其他身份</dt><dd>{[counselor.monitorClassCount ? "兼任班长" : "", counselor.attendanceAssistantClassCount ? "兼任考勤员" : ""].filter(Boolean).join("、") || "—"}</dd></div></dl>
             <div className="card-actions"><button className="secondary" onClick={() => setEditingCounselor(counselor)} disabled={loading}>编辑资料</button><button className="secondary" onClick={() => void toggleCounselor(counselor)} disabled={loading || (counselor.active !== false && Boolean(counselor.activeClassCount))} title={counselor.active !== false && counselor.activeClassCount ? "请先转交其负责的班级" : undefined}>{counselor.active === false ? "恢复" : "停用"}</button>{counselor.deletable && <button className="ghost danger" onClick={() => void deleteCounselor(counselor)} disabled={loading}>永久删除</button>}</div>
           </article>)}</div></>}
-          <div className="permission-note"><strong>为什么有些账号不能删除？</strong><span>只要账号已经关联班级、学员、班长或考勤历史，就只能停用，以保证历史记录仍能显示正确的操作人。</span></div>
+          <div className="permission-note"><strong>为什么有些账号不能删除？</strong><span>只要账号已经关联班级、学员、班长、考勤员或考勤历史，就只能停用，以保证历史记录仍能显示正确的操作人。</span></div>
           <div className="modal-actions"><button type="button" className="primary" onClick={() => setShowCounselorManager(false)}>完成</button></div>
         </div>
       </Modal>}
@@ -949,6 +969,7 @@ function MetricCard({ metric, summary, compact = false }: { metric: Metric; summ
 
 function OverviewPage({ currentClass }: { currentClass: ClassSummary }) {
   const { go } = useNavigation();
+  const attendanceAssistant = currentClass.permission === "attendance_assistant";
   const [report, setReport] = useState<ReportPayload | null>(null);
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
@@ -962,15 +983,15 @@ function OverviewPage({ currentClass }: { currentClass: ClassSummary }) {
       const [reportData, lessonsData, studentsData] = await Promise.all([
         apiJson<unknown>(`/api/classes/${currentClass.id}/reports?range=recent`),
         apiJson<unknown>(`/api/classes/${currentClass.id}/lessons`),
-        apiJson<unknown>(`/api/classes/${currentClass.id}/students`)
+        attendanceAssistant ? Promise.resolve(null) : apiJson<unknown>(`/api/classes/${currentClass.id}/students`)
       ]);
       setReport(reportFromRaw(reportData, "recent"));
       setLessons(asList<Record<string, unknown>>(lessonsData, "lessons", "items").map(lessonFromRaw));
-      setStudents(asList<Record<string, unknown>>(studentsData, "students", "items").map(studentFromRaw));
+      setStudents(studentsData == null ? [] : asList<Record<string, unknown>>(studentsData, "students", "items").map(studentFromRaw));
     } catch (error) {
       setNotice({ tone: "error", text: errorText(error) });
     } finally { setLoading(false); }
-  }, [currentClass.id]);
+  }, [attendanceAssistant, currentClass.id]);
 
   useEffect(() => { void load(); }, [load]);
   const currentLesson = lessons.find((item) => item.status === "current") ?? lessons.find((item) => !item.started) ?? lessons.at(-1);
@@ -986,9 +1007,9 @@ function OverviewPage({ currentClass }: { currentClass: ClassSummary }) {
           <span className="soft-badge blue">{currentLesson ? `第 ${currentLesson.lessonNumber} 课` : "尚未排课"}</span>
           <h2>{currentLesson?.title || "准备好后，从生成课表开始"}</h2>
           {currentLesson ? <p>班修截止：{currentLesson.classStudyDueDate || "待设置"} · {currentLesson.cadenceMode === "same_week" ? "同周完成" : "平行两周"}</p> : <p>{currentClass.sourceProgress ? `原表进度：${currentClass.sourceProgress}。` : "创建课表后，班长就可以按课次登记三项考勤。"}{currentClass.meetingTime ? ` 共修时间：${currentClass.meetingTime}。` : ""}</p>}
-          <div className="hero-actions"><button className="primary" onClick={() => go("/attendance")} disabled={!currentLesson}><ClipboardCheck size={17} /> 去登记考勤</button><button className="glass-button" onClick={() => go("/lessons")}><CalendarDays size={17} /> 查看课表</button></div>
+          <div className="hero-actions"><button className="primary" onClick={() => go("/attendance")} disabled={!currentLesson}><ClipboardCheck size={17} /> 去登记考勤</button>{!attendanceAssistant && <button className="glass-button" onClick={() => go("/lessons")}><CalendarDays size={17} /> 查看课表</button>}</div>
         </div>
-        <div className="hero-art"><CloudSun size={68} /><span>{activeStudents.length}</span><small>在册学员</small></div>
+        <div className="hero-art"><CloudSun size={68} /><span>{attendanceAssistant ? currentClass.studentCount ?? 0 : activeStudents.length}</span><small>在册学员</small></div>
       </section>
       <section>
         <div className="section-title"><div><h2>最近完成率</h2><p>三项指标独立统计，未填写不进入完成率分母。</p></div><button className="text-button" onClick={() => go("/reports")}>查看完整报表 →</button></div>
@@ -1022,7 +1043,7 @@ function StudentEditor({ classId, student, groups, isAdmin, onClose, onSaved }: 
   const [groupId, setGroupId] = useState(String(student?.groupId ?? groups[0]?.id ?? ""));
   const [note, setNote] = useState(student?.note ?? "");
   const [status, setStatus] = useState<EnrollmentStatus>(student?.status ?? "normal");
-  const [identities, setIdentities] = useState<EnrollmentRole[]>(student?.identities?.filter((role) => !["monitor", "student"].includes(role)) ?? []);
+  const [identities, setIdentities] = useState<EnrollmentRole[]>(student?.identities?.filter((role) => !["monitor", "attendance_assistant", "student"].includes(role)) ?? []);
   const [currentPassword, setCurrentPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(null);
@@ -1046,7 +1067,7 @@ function StudentEditor({ classId, student, groups, isAdmin, onClose, onSaved }: 
       {isAdmin && student && <label>管理员当前密码（修改登录手机号时必填）<input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} autoComplete="current-password" placeholder="普通学员或手机号不变时可以留空" /><small>如果该学员同时是班长或辅导员，修改手机号会同步改变其登录账号。</small></label>}
       <label>所在小组<select value={groupId} onChange={(e) => setGroupId(e.target.value)} required>{groups.filter((g) => g.active !== false).map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
       <label>学员状态<select value={status} onChange={(e) => setStatus(e.target.value as EnrollmentStatus)}><option value="normal">正常（参与完成率统计）</option><option value="leave">休学（暂不统计）</option><option value="withdrawn">退学（不再统计）</option></select><small>状态从下一课起生效，已开始课次和历史完成率不会改变。</small></label>
-      <fieldset className="identity-field"><legend>班级身份（可多选）</legend><div className="checkbox-grid">{EDITABLE_ROLE_OPTIONS.map((option) => <label key={option.value}><input type="checkbox" checked={identities.includes(option.value)} onChange={(event) => setIdentities((current) => event.target.checked ? [...current, option.value] : current.filter((role) => role !== option.value))} /><span>{option.label}</span></label>)}</div><small>“学员”默认显示；“班长”与班级设置中的任命自动同步。每组只能设置一名组长。</small></fieldset>
+      <fieldset className="identity-field"><legend>班级身份（可多选）</legend><div className="checkbox-grid">{EDITABLE_ROLE_OPTIONS.map((option) => <label key={option.value}><input type="checkbox" checked={identities.includes(option.value)} onChange={(event) => setIdentities((current) => event.target.checked ? [...current, option.value] : current.filter((role) => role !== option.value))} /><span>{option.label}</span></label>)}</div><small>“学员”默认显示；“班长”和“考勤员”由班级设置统一管理。每组只能设置一名组长。</small></fieldset>
       <label>备注（选填）<textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} placeholder="仅管理员和辅导员可见" /></label>
       <Notice notice={notice} />
       <div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>取消</button><button className="primary" disabled={loading}>{loading ? "保存中..." : "保存"}</button></div>
@@ -1523,6 +1544,17 @@ function LessonsPage({ currentClass, isAdmin, onClassRefresh }: { currentClass: 
   </main>;
 }
 
+function attendanceAssistantFromRaw(raw: Record<string, unknown>): AttendanceAssistant {
+  return {
+    enrollmentId: Number(raw.enrollmentId ?? raw.studentId ?? raw.id),
+    userId: Number(raw.userId ?? raw.accountId),
+    name: String(raw.name ?? ""),
+    dharmaName: raw.dharmaName == null ? null : String(raw.dharmaName),
+    phone: raw.phone == null ? null : String(raw.phone),
+    username: String(raw.username ?? raw.loginIdentifier ?? "")
+  };
+}
+
 function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; currentClass: ClassSummary; onRefresh: () => Promise<void> }) {
   const { go } = useNavigation();
   const [name, setName] = useState(currentClass.name);
@@ -1532,18 +1564,28 @@ function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; cu
   const [counselorId, setCounselorId] = useState(String(currentClass.counselorId ?? ""));
   const [monitorId, setMonitorId] = useState(String(currentClass.monitorId ?? ""));
   const [monitorUsername, setMonitorUsername] = useState("");
+  const [assistantId, setAssistantId] = useState("");
+  const [assistantUsername, setAssistantUsername] = useState("");
+  const [attendanceAssistants, setAttendanceAssistants] = useState<AttendanceAssistant[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
   const [counselors, setCounselors] = useState<Counselor[]>([]);
   const [notice, setNotice] = useState<NoticeState>(null);
   const [loading, setLoading] = useState(false);
 
+  const loadAttendanceAssistants = useCallback(async () => {
+    const data = await apiJson<unknown>(`/api/classes/${currentClass.id}/attendance-assistants`);
+    setAttendanceAssistants(asList<Record<string, unknown>>(data, "assistants", "items").map(attendanceAssistantFromRaw));
+  }, [currentClass.id]);
+
   useEffect(() => {
     setName(currentClass.name); setMeetingTime(currentClass.meetingTime ?? ""); setSourceProgress(currentClass.sourceProgress ?? ""); setCadenceMode(currentClass.cadenceMode ?? "same_week"); setCounselorId(String(currentClass.counselorId ?? "")); setMonitorId(String(currentClass.monitorId ?? ""));
+    setAssistantId(""); setAssistantUsername("");
     void Promise.all([
       apiJson<unknown>(`/api/classes/${currentClass.id}/students`).then((data) => setStudents(asList<Record<string, unknown>>(data, "students", "items").map(studentFromRaw))),
+      loadAttendanceAssistants(),
       user.isAdmin ? apiJson<unknown>("/api/admin/counselors").then((data) => setCounselors(asList<Record<string, unknown>>(data, "counselors", "items").map((raw) => ({ id: Number(raw.id ?? raw.accountId), displayName: String(raw.displayName ?? raw.name), phone: raw.phone == null ? null : String(raw.phone), username: raw.username == null ? null : String(raw.username), active: raw.active == null ? true : Boolean(raw.active) })))) : Promise.resolve()
     ]).catch((error) => setNotice({ tone: "error", text: errorText(error) }));
-  }, [currentClass, user.isAdmin]);
+  }, [currentClass, loadAttendanceAssistants, user.isAdmin]);
 
   async function saveClass(event: FormEvent) {
     event.preventDefault(); setLoading(true);
@@ -1560,7 +1602,7 @@ function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; cu
       const result = await apiJson<Record<string, unknown>>(`/api/classes/${currentClass.id}/monitor`, { method: "PUT", body: JSON.stringify({ studentId: monitorId ? Number(monitorId) : null, username: monitorUsername.trim() || undefined }) });
       const temporaryPassword = String(result.temporaryPassword ?? (result.account as Record<string, unknown> | undefined)?.temporaryPassword ?? "");
       const loginIdentifier = String(result.loginIdentifier ?? result.username ?? "");
-      await onRefresh();
+      await Promise.all([onRefresh(), loadAttendanceAssistants()]);
       setNotice({ tone: "success", text: temporaryPassword ? `班长已设置：登录账号 ${loginIdentifier}，临时密码 ${temporaryPassword}` : monitorId ? `班长已设置，登录账号 ${loginIdentifier}，新权限立即生效` : "班长已取消" });
     } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
     finally { setLoading(false); }
@@ -1588,9 +1630,56 @@ function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; cu
     finally { setLoading(false); }
   }
 
+  async function assignAttendanceAssistant() {
+    if (!assistantId) {
+      setNotice({ tone: "info", text: "请先选择一位正常学员" });
+      return;
+    }
+    setLoading(true);
+    try {
+      const result = await apiJson<Record<string, unknown>>(`/api/classes/${currentClass.id}/attendance-assistants`, {
+        method: "POST",
+        body: JSON.stringify({ studentId: Number(assistantId), username: assistantUsername.trim() || undefined })
+      });
+      const temporaryPassword = String(result.temporaryPassword ?? (result.account as Record<string, unknown> | undefined)?.temporaryPassword ?? "");
+      const loginIdentifier = String(result.loginIdentifier ?? result.username ?? (result.account as Record<string, unknown> | undefined)?.username ?? "");
+      const selected = students.find((item) => item.id === Number(assistantId));
+      await loadAttendanceAssistants();
+      setAssistantId(""); setAssistantUsername("");
+      setNotice({
+        tone: "success",
+        text: temporaryPassword
+          ? `考勤员已设置：登录账号 ${loginIdentifier}，临时密码 ${temporaryPassword}`
+          : `“${selected?.name || selected?.dharmaName || "所选学员"}”已获得考勤员权限${loginIdentifier ? `，登录账号 ${loginIdentifier}` : ""}`
+      });
+    } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
+    finally { setLoading(false); }
+  }
+
+  async function removeAttendanceAssistant(assistant: AttendanceAssistant) {
+    if (!window.confirm(`确定取消“${assistant.name || assistant.dharmaName || "当前考勤员"}”的考勤员权限吗？取消后会立即停止以此身份访问本班。`)) return;
+    setLoading(true);
+    try {
+      await apiJson(`/api/classes/${currentClass.id}/attendance-assistants/${assistant.enrollmentId}`, { method: "DELETE" });
+      await loadAttendanceAssistants();
+      setNotice({ tone: "success", text: "考勤员权限已取消，学员身份和历史修改记录仍会保留" });
+    } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
+    finally { setLoading(false); }
+  }
+
+  async function resetAttendanceAssistantPassword(assistant: AttendanceAssistant) {
+    if (!window.confirm(`确定为“${assistant.name || assistant.dharmaName || "当前考勤员"}”生成新的临时密码吗？`)) return;
+    setLoading(true);
+    try {
+      const result = await apiJson<{ temporaryPassword: string }>(`/api/classes/${currentClass.id}/attendance-assistants/${assistant.enrollmentId}/reset-password`, { method: "POST" });
+      setNotice({ tone: "success", text: `考勤员 ${assistant.name || assistant.dharmaName} 的临时密码已重置：${result.temporaryPassword}；首次登录必须修改。` });
+    } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
+    finally { setLoading(false); }
+  }
+
   async function toggleClassStatus() {
     const restoring = Boolean(currentClass.archived);
-    if (!window.confirm(restoring ? `确定恢复“${currentClass.name}”吗？` : `确定停用“${currentClass.name}”吗？班长将停止访问，历史数据仍会保留。`)) return;
+    if (!window.confirm(restoring ? `确定恢复“${currentClass.name}”吗？` : `确定停用“${currentClass.name}”吗？班长和考勤员将停止访问，历史数据仍会保留。`)) return;
     setLoading(true);
     try {
       await apiJson(`/api/classes/${currentClass.id}`, { method: "PATCH", body: JSON.stringify({ archived: !restoring }) });
@@ -1616,13 +1705,24 @@ function SettingsPage({ user, currentClass, onRefresh }: { user: CurrentUser; cu
       </form>
       <section className="panel form-stack">
         <div className="panel-head"><div><h2>班长账号</h2><p>必须从当前在册学员中选择，每班最多一位班长。</p></div><UserCog size={20} /></div>
-        <label>选择班长<select value={monitorId} onChange={(e) => { setMonitorId(e.target.value); setMonitorUsername(""); }}><option value="">暂不设置班长</option>{students.filter((s) => s.active !== false).map((s) => <option key={s.id} value={s.id}>{s.name || s.dharmaName}{s.name && s.dharmaName ? `（${s.dharmaName}）` : ""} · {s.groupName}{s.phone ? "" : " · 无手机号"}</option>)}</select><small>正常学员均可担任班长；没有手机号时系统会生成拼音账号和临时密码。</small></label>
+        <label>选择班长<select value={monitorId} onChange={(e) => { setMonitorId(e.target.value); setMonitorUsername(""); }}><option value="">暂不设置班长</option>{students.filter((s) => s.active !== false).map((s) => <option key={s.id} value={s.id}>{s.name || s.dharmaName}{s.name && s.dharmaName && s.name !== s.dharmaName ? `（${s.dharmaName}）` : ""} · {s.groupName}{s.phone ? "" : " · 无手机号"}</option>)}</select><small>正常学员均可担任班长；没有手机号时系统会生成拼音账号和临时密码。</small></label>
         {monitorId && !students.find((item) => item.id === Number(monitorId))?.phone && <label>班长登录账号（选填）<input value={monitorUsername} onChange={(event) => setMonitorUsername(event.target.value)} autoCapitalize="none" placeholder="留空则根据姓名或法名自动生成" /><small>可以先填写希望使用的拼音账号；重名时系统会提示修改。</small></label>}
         <div className="row-actions align-start"><button type="button" className="primary" onClick={() => void assignMonitor()} disabled={loading}><ShieldCheck size={17} /> 应用班长设置</button>{currentClass.monitorId && <button type="button" className="secondary" onClick={() => void resetMonitorPassword()} disabled={loading}>重置班长密码</button>}{currentClass.monitorId && <button type="button" className="ghost danger" onClick={() => void cancelMonitor()} disabled={loading}>取消班长权限</button>}</div>
-        <div className="permission-note"><strong>班长可以做什么？</strong><span>登记本班三项考勤，查看本班统计；不能查看手机号和备注，也不能维护名单或课表。</span></div>
+        <div className="permission-note"><strong>班长可以做什么？</strong><span>登记本班三项考勤、查看本班统计，并管理尚未开始的课表；不能查看手机号和备注，也不能维护学员、小组或班级设置。</span></div>
+      </section>
+      <section className="panel form-stack attendance-assistant-settings">
+        <div className="panel-head"><div><h2>考勤员账号</h2><p>可从正常学员中指定多位考勤协助人员。</p></div><ClipboardCheck size={20} /></div>
+        {attendanceAssistants.length ? <div className="assistant-account-list">{attendanceAssistants.map((assistant) => <article className="assistant-account" key={assistant.enrollmentId}>
+          <div className="person-cell"><div className="mini-avatar">{(assistant.name || assistant.dharmaName || "考").slice(0, 1)}</div><span><strong>{assistant.name || assistant.dharmaName}</strong><small>{assistant.dharmaName && assistant.dharmaName !== assistant.name ? `${assistant.dharmaName} · ` : ""}账号：{assistant.username || "—"}</small></span><span className="role-badge attendance_assistant">考勤员</span></div>
+          <div className="assistant-account-actions"><button type="button" className="secondary" onClick={() => void resetAttendanceAssistantPassword(assistant)} disabled={loading}>重置密码</button><button type="button" className="ghost danger" onClick={() => void removeAttendanceAssistant(assistant)} disabled={loading}>取消权限</button></div>
+        </article>)}</div> : <p className="assistant-empty">本班暂未设置考勤员。</p>}
+        <label>新增考勤员<select value={assistantId} onChange={(event) => { setAssistantId(event.target.value); setAssistantUsername(""); }}><option value="">请选择正常学员</option>{students.filter((student) => student.active !== false && student.status === "normal" && !attendanceAssistants.some((assistant) => assistant.enrollmentId === student.id)).map((student) => <option key={student.id} value={student.id}>{student.name || student.dharmaName}{student.name && student.dharmaName && student.name !== student.dharmaName ? `（${student.dharmaName}）` : ""} · {student.groupName}{student.phone ? "" : " · 无手机号"}</option>)}</select><small>已有账号时直接增加权限；没有账号时会生成一次性临时密码。</small></label>
+        {assistantId && !students.find((item) => item.id === Number(assistantId))?.phone && <label>考勤员登录账号（选填）<input value={assistantUsername} onChange={(event) => setAssistantUsername(event.target.value)} autoCapitalize="none" placeholder="留空则根据姓名或法名自动生成" /><small>可填写希望使用的拼音账号；重名时系统会提示修改。</small></label>}
+        <button type="button" className="primary align-start" onClick={() => void assignAttendanceAssistant()} disabled={loading || !assistantId}><ShieldCheck size={17} /> 新增考勤员</button>
+        <div className="permission-note"><strong>考勤员可以做什么？</strong><span>填写本班考勤并查看统计；不能查看学员电话和备注，也不能管理课表、名册、小组、班级设置或导出数据。</span></div>
       </section>
     </div>
-    <section className={`panel danger-zone ${currentClass.archived ? "restore-zone" : ""}`}><div><h2>{currentClass.archived ? "恢复班级" : "停用班级"}</h2><p>{currentClass.archived ? "恢复后可继续维护名册、课表和考勤。" : "停用不会删除历史记录；管理员和辅导员仍可查看，班长立即停止访问。"}</p></div><button className={currentClass.archived ? "secondary" : "ghost danger"} onClick={() => void toggleClassStatus()} disabled={loading}><Archive size={17} /> {currentClass.archived ? "恢复正常使用" : "停用这个班级"}</button></section>
+    <section className={`panel danger-zone ${currentClass.archived ? "restore-zone" : ""}`}><div><h2>{currentClass.archived ? "恢复班级" : "停用班级"}</h2><p>{currentClass.archived ? "恢复后可继续维护名册、课表和考勤。" : "停用不会删除历史记录；管理员和辅导员仍可查看，班长和考勤员立即停止访问。"}</p></div><button className={currentClass.archived ? "secondary" : "ghost danger"} onClick={() => void toggleClassStatus()} disabled={loading}><Archive size={17} /> {currentClass.archived ? "恢复正常使用" : "停用这个班级"}</button></section>
   </main>;
 }
 
@@ -1715,7 +1815,8 @@ function AttendancePage({ currentClass, user }: { currentClass: ClassSummary; us
 
   const groups = useMemo(() => Array.from(new Map(rows.map((row) => [row.groupId, row.groupName])).entries()).map(([id, name]) => ({ id, name })), [rows]);
   const visibleRows = rows.filter((row) => groupFilter === "all" || String(row.groupId) === groupFilter);
-  const editable = Boolean(payload?.canEdit) && !(payload?.lockedForMonitor && !user.isAdmin && currentClass.permission === "monitor");
+  const limitedAttendanceRole = currentClass.permission === "monitor" || currentClass.permission === "attendance_assistant";
+  const editable = Boolean(payload?.canEdit) && !(payload?.lockedForMonitor && !user.isAdmin && limitedAttendanceRole);
   const metricEditable = (metric: Metric) => editable && (user.isAdmin || currentClass.permission === "counselor" || payload?.openMetrics?.[metric] !== false);
   const changeSummary = useMemo(() => {
     const baseline = new Map(baselineRows.map((row) => [row.studentId, row]));
@@ -1788,7 +1889,7 @@ function AttendancePage({ currentClass, user }: { currentClass: ClassSummary; us
         <div><span className="soft-badge blue">第 {payload.lesson.lessonNumber} 课</span><div><h2>{payload.lesson.title}</h2><p>{payload.lesson.lessonType === "review" ? "复习课 · 导图/提纲自动标记为不需要" : "普通课"} · 班修截止 {payload.lesson.classStudyDueDate}</p></div></div>
         <div className="pending-pills"><span>导图待填 <b>{pendingCounts.outline}</b></span><span>组修待填 <b>{pendingCounts.group}</b></span><span>班修待填 <b>{pendingCounts.classStudy}</b></span></div>
       </section>
-      {!editable && <div className="notice info"><AlertTriangle size={17} /><span>{payload.lockedForMonitor ? "本课已超过班修截止日 14 天，班长登记已锁定；请联系辅导员补改。" : "您没有编辑本课考勤的权限。"}</span></div>}
+      {!editable && <div className="notice info"><AlertTriangle size={17} /><span>{payload.lockedForMonitor ? "本课已超过班修截止日 14 天，班长和考勤员的登记已锁定；请联系辅导员补改。" : "您没有编辑本课考勤的权限。"}</span></div>}
       <section className="panel batch-panel">
         <div className="panel-head"><div><h2>批量填写</h2><p>作用范围：{groupFilter === "all" ? `全班 ${visibleRows.length} 人` : `${groups.find((g) => String(g.id) === groupFilter)?.name} ${visibleRows.length} 人`}</p></div><span className="step-chip">第 1 步</span></div>
         <div className="batch-grid">
@@ -1986,7 +2087,7 @@ function AppContent() {
   else if (path === "/reports") content = <ReportsPage currentClass={currentClass!} canExport={manager} />;
   else if (path === "/students" && manager) content = <StudentsPage currentClass={currentClass!} />;
   else if (path === "/groups" && manager) content = <GroupsPage currentClass={currentClass!} onClassRefresh={() => loadClasses()} />;
-  else if (path === "/lessons") content = <LessonsPage currentClass={currentClass!} isAdmin={user.isAdmin} onClassRefresh={() => loadClasses()} />;
+  else if (path === "/lessons" && currentClass!.permission !== "attendance_assistant") content = <LessonsPage currentClass={currentClass!} isAdmin={user.isAdmin} onClassRefresh={() => loadClasses()} />;
   else if (path === "/settings" && manager) content = <SettingsPage user={user} currentClass={currentClass!} onRefresh={() => loadClasses()} />;
   else content = <OverviewPage currentClass={currentClass!} />;
 

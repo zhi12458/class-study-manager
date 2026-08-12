@@ -10,7 +10,10 @@ import {
   type EnrollmentRole, type EnrollmentStatus, type Metric, type ReportRange
 } from "../shared/types.js";
 import { normalizePhone } from "../shared/phone.js";
-import { type AuthedRequest, requireAdmin, requireAuth, requireClassAccess, requireClassScheduleAccess } from "./access.js";
+import {
+  type AuthedRequest, requireAdmin, requireAuth, requireClassAccess,
+  requireClassAttendanceAccess, requireClassReportAccess, requireClassScheduleAccess
+} from "./access.js";
 import {
   createPasswordHash, createSession, deleteSession, generateTemporaryPassword,
   listClassAccesses, loadSessionUser, verifyPassword
@@ -184,9 +187,45 @@ function accountUsername(
   return username;
 }
 
+type ClassOperatorStudent = {
+  id: number;
+  personId: number;
+  name: string;
+  dharmaName: string | null;
+  phone: string | null;
+};
+
+function ensureClassOperatorAccount(
+  db: DatabaseSync,
+  student: ClassOperatorStudent,
+  requestedUsername: unknown
+): { userId: number; username: string; temporaryPassword?: string } {
+  const existing = db.prepare("select id, username from users where person_id = ?").get(student.personId) as
+    | { id: number; username: string }
+    | undefined;
+  const displayName = personDisplayName(student.name, student.dharmaName);
+  if (existing) {
+    db.prepare("update users set active = 1, display_name = ?, updated_at = current_timestamp where id = ?")
+      .run(displayName, existing.id);
+    return { userId: existing.id, username: existing.username };
+  }
+  const temporaryPassword = generateTemporaryPassword();
+  const username = accountUsername(db, {
+    phone: student.phone,
+    requested: requestedUsername,
+    displayName
+  });
+  const result = db.prepare(
+    "insert into users (person_id, username, password_hash, display_name, must_change_password) values (?, ?, ?, ?, 1)"
+  ).run(student.personId, username, createPasswordHash(temporaryPassword), displayName);
+  return { userId: Number(result.lastInsertRowid), username, temporaryPassword };
+}
+
 function listClasses(db: DatabaseSync, userId: number, isAdmin: boolean, canCounsel: boolean) {
-  const where = isAdmin ? "1 = 1" : "(? = 1 and c.counselor_user_id = ?) or (m.user_id = ? and c.archived = 0)";
-  const params: SQLInputValue[] = isAdmin ? [] : [canCounsel ? 1 : 0, userId, userId];
+  const where = isAdmin ? "1 = 1" : `(? = 1 and c.counselor_user_id = ?)
+    or (c.archived = 0 and exists (select 1 from class_monitors mx where mx.class_id = c.id and mx.user_id = ?))
+    or (c.archived = 0 and exists (select 1 from class_attendance_assistants ax where ax.class_id = c.id and ax.user_id = ?))`;
+  const params: SQLInputValue[] = isAdmin ? [] : [canCounsel ? 1 : 0, userId, userId, userId];
   return db.prepare(
     `select c.id, c.name, c.cadence_mode as cadenceMode, c.archived,
             c.meeting_time as meetingTime, c.source_progress as sourceProgress,
@@ -200,15 +239,22 @@ function listClasses(db: DatabaseSync, userId: number, isAdmin: boolean, canCoun
                        and not exists (select 1 from lessons l where l.class_id = c.id)
                        and not exists (select 1 from schedule_breaks b where b.class_id = c.id)
                  then 1 else 0 end as deletable,
-            case when ? = 1 and c.counselor_user_id = ? then 'counselor' when m.user_id = ? then 'monitor' else 'admin' end as permission
+            case when ? = 1 then 'admin'
+                 when ? = 1 and c.counselor_user_id = ? then 'counselor'
+                 when exists (select 1 from class_monitors mx where mx.class_id = c.id and mx.user_id = ?) then 'monitor'
+                 when exists (select 1 from class_attendance_assistants ax where ax.class_id = c.id and ax.user_id = ?) then 'attendance_assistant'
+                 else 'admin' end as permission
        from classes c
        join users cu on cu.id = c.counselor_user_id
        left join class_monitors m on m.class_id = c.id
        left join enrollments me on me.id = m.enrollment_id
        left join persons mp on mp.id = me.person_id
       where ${where}
-      order by c.archived, c.id desc`
-  ).all(canCounsel ? 1 : 0, userId, userId, ...params);
+      order by c.archived,
+               case when trim(c.name) glob '[0-9]*' and trim(c.name) not glob '*[^0-9]*' then 0 else 1 end,
+               case when trim(c.name) glob '[0-9]*' and trim(c.name) not glob '*[^0-9]*' then cast(trim(c.name) as integer) end,
+               c.id desc`
+  ).all(isAdmin ? 1 : 0, canCounsel ? 1 : 0, userId, userId, userId, ...params);
 }
 
 function deactivateRolelessUser(db: DatabaseSync, userId: number): void {
@@ -219,7 +265,10 @@ function deactivateRolelessUser(db: DatabaseSync, userId: number): void {
   const hasMonitorAccess = db.prepare(
     "select 1 from class_monitors m join classes c on c.id = m.class_id where m.user_id = ? and c.archived = 0 limit 1"
   ).get(userId);
-  if (hasMonitorAccess) return;
+  const hasAttendanceAccess = db.prepare(
+    "select 1 from class_attendance_assistants a join classes c on c.id = a.class_id where a.user_id = ? and c.archived = 0 limit 1"
+  ).get(userId);
+  if (hasMonitorAccess || hasAttendanceAccess) return;
   db.prepare("update users set active = 0, updated_at = current_timestamp where id = ?").run(userId);
   db.prepare("delete from sessions_auth where user_id = ?").run(userId);
 }
@@ -470,12 +519,14 @@ export function createApiRouter(db: DatabaseSync) {
               (select count(*) from classes c where c.counselor_user_id = u.id and c.archived = 0) as activeClassCount,
               (select count(*) from classes c where c.counselor_user_id = u.id and c.archived = 1) as archivedClassCount,
               (select count(*) from class_monitors m join classes c on c.id = m.class_id where m.user_id = u.id and c.archived = 0) as monitorClassCount,
+              (select count(*) from class_attendance_assistants a join classes c on c.id = a.class_id where a.user_id = u.id and c.archived = 0) as attendanceAssistantClassCount,
               case when
                 not exists (select 1 from classes c where c.counselor_user_id = u.id or c.created_by = u.id)
                 and not exists (select 1 from schedule_breaks b where b.created_by = u.id)
                 and not exists (select 1 from attendance_entries a where a.modified_by = u.id)
                 and not exists (select 1 from attendance_audit a where a.modified_by = u.id)
                 and not exists (select 1 from class_monitors m where m.user_id = u.id or m.assigned_by = u.id)
+                and not exists (select 1 from class_attendance_assistants a where a.user_id = u.id or a.assigned_by = u.id)
                 and not exists (select 1 from class_counselor_history h where h.counselor_user_id = u.id or h.assigned_by = u.id)
                 and not exists (select 1 from enrollments e where e.person_id = u.person_id)
               then 1 else 0 end as deletable
@@ -579,12 +630,16 @@ export function createApiRouter(db: DatabaseSync) {
     const isMonitor = Boolean(db.prepare(
       "select 1 from class_monitors m join classes c on c.id = m.class_id where m.user_id = ? and c.archived = 0 limit 1"
     ).get(id));
+    const isAttendanceAssistant = Boolean(db.prepare(
+      "select 1 from class_attendance_assistants a join classes c on c.id = a.class_id where a.user_id = ? and c.archived = 0 limit 1"
+    ).get(id));
+    const keepsAccount = isMonitor || isAttendanceAssistant;
     db.exec("begin immediate");
     try {
-      db.prepare("update users set can_counsel = 0, active = ?, updated_at = current_timestamp where id = ?").run(isMonitor ? 1 : 0, id);
-      if (!isMonitor) db.prepare("delete from sessions_auth where user_id = ?").run(id);
+      db.prepare("update users set can_counsel = 0, active = ?, updated_at = current_timestamp where id = ?").run(keepsAccount ? 1 : 0, id);
+      if (!keepsAccount) db.prepare("delete from sessions_auth where user_id = ?").run(id);
       db.exec("commit");
-      res.json({ ok: true, active: false, accountActive: isMonitor });
+      res.json({ ok: true, active: false, accountActive: keepsAccount });
     } catch (error) { db.exec("rollback"); throw error; }
   });
 
@@ -601,9 +656,10 @@ export function createApiRouter(db: DatabaseSync) {
         (select count(*) from attendance_entries a where a.modified_by = ?) +
         (select count(*) from attendance_audit a where a.modified_by = ?) +
         (select count(*) from class_monitors m where m.user_id = ? or m.assigned_by = ?) +
+        (select count(*) from class_attendance_assistants a where a.user_id = ? or a.assigned_by = ?) +
         (select count(*) from class_counselor_history h where h.counselor_user_id = ? or h.assigned_by = ?) +
         (select count(*) from enrollments e where e.person_id = ?) as count`
-    ).get(id, id, id, id, id, id, id, id, id, counselor.personId) as { count: number };
+    ).get(id, id, id, id, id, id, id, id, id, id, id, counselor.personId) as { count: number };
     if (references.count > 0) {
       return void res.status(409).json({ error: "该账号已有班级、学员或操作历史，只能停用，不能永久删除" });
     }
@@ -709,8 +765,13 @@ export function createApiRouter(db: DatabaseSync) {
         db.prepare("update classes set archived = ?, updated_at = current_timestamp where id = ?").run(req.body.archived ? 1 : 0, classId);
         if (req.body.archived === true) {
           const monitor = db.prepare("select user_id as userId from class_monitors where class_id = ?").get(classId) as { userId: number } | undefined;
+          const assistants = db.prepare(
+            "select user_id as userId from class_attendance_assistants where class_id = ?"
+          ).all(classId) as Array<{ userId: number }>;
           db.prepare("delete from class_monitors where class_id = ?").run(classId);
+          db.prepare("delete from class_attendance_assistants where class_id = ?").run(classId);
           if (monitor) deactivateRolelessUser(db, monitor.userId);
+          assistants.forEach((assistant) => deactivateRolelessUser(db, assistant.userId));
         }
       }
       if (desired !== undefined) {
@@ -819,12 +880,14 @@ export function createApiRouter(db: DatabaseSync) {
               es.status,
               (select group_concat(er.role) from enrollment_roles er where er.enrollment_id = e.id) as roleCsv,
               case when m.enrollment_id is not null then 1 else 0 end as isMonitor,
+              case when aa.enrollment_id is not null then 1 else 0 end as isAttendanceAssistant,
               e.active_from_sequence as activeFromSequence, e.inactive_from_sequence as inactiveFromSequence
          from enrollments e join persons p on p.id = e.person_id
          left join group_assignments ga on ga.enrollment_id = e.id and ga.effective_to_sequence is null
          left join groups g on g.id = ga.group_id
          join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
          left join class_monitors m on m.class_id = e.class_id and m.enrollment_id = e.id
+         left join class_attendance_assistants aa on aa.class_id = e.class_id and aa.enrollment_id = e.id
         where e.class_id = ?
         order by case es.status when 'normal' then 0 when 'leave' then 1 else 2 end, g.sort_order, p.name`
     ).all(classId).map((row) => {
@@ -833,7 +896,12 @@ export function createApiRouter(db: DatabaseSync) {
       return {
         ...item,
         active: item.status === "normal",
-        identities: [...(item.isMonitor ? ["monitor"] : []), ...roles, "student"]
+        identities: [
+          ...(item.isMonitor ? ["monitor"] : []),
+          ...(item.isAttendanceAssistant ? ["attendance_assistant"] : []),
+          ...roles,
+          "student"
+        ]
       };
     });
     const visible = req.classPermission === "monitor"
@@ -881,6 +949,10 @@ export function createApiRouter(db: DatabaseSync) {
     if (requestedStatus !== "normal" && row.currentStatus === "normal" &&
       db.prepare("select 1 from class_monitors where class_id = ? and enrollment_id = ?").get(classId, enrollmentId)) {
       return void res.status(400).json({ error: "该学员当前是班长，请先更换或取消班长后再修改状态" });
+    }
+    if (requestedStatus !== "normal" && row.currentStatus === "normal" &&
+      db.prepare("select 1 from class_attendance_assistants where class_id = ? and enrollment_id = ?").get(classId, enrollmentId)) {
+      return void res.status(400).json({ error: "该学员当前是考勤员，请先取消考勤员权限后再修改状态" });
     }
     const effectiveSequence = getNextEffectiveSequence(db, classId);
     db.exec("begin immediate");
@@ -1022,7 +1094,7 @@ export function createApiRouter(db: DatabaseSync) {
     } catch (error) { db.exec("rollback"); throw error; }
   });
 
-  router.get("/classes/:classId/lessons", requireAuth, requireClassAccess(db), (req, res) => {
+  router.get("/classes/:classId/lessons", requireAuth, requireClassAttendanceAccess(db), (req, res) => {
     const classId = numberParam(req.params.classId); const today = shanghaiToday();
     const lessons = (db.prepare(
       `select id, sequence, sequence as lessonNumber, title, lesson_type as lessonType, cadence_mode as cadenceMode,
@@ -1147,35 +1219,24 @@ export function createApiRouter(db: DatabaseSync) {
     db.exec("begin immediate");
     try {
       const previous = db.prepare("select user_id as userId from class_monitors where class_id = ?").get(classId) as { userId: number } | undefined;
-      let user = db.prepare("select id, username from users where person_id = ?").get(student.personId) as { id: number; username: string } | undefined;
-      let temporaryPassword: string | undefined;
-      const displayName = personDisplayName(student.name, student.dharmaName);
-      if (!user) {
-        temporaryPassword = generateTemporaryPassword();
-        const username = accountUsername(db, {
-          phone: student.phone, requested: req.body.username, displayName
-        });
-        const result = db.prepare(
-          `insert into users (person_id, username, password_hash, display_name, must_change_password) values (?, ?, ?, ?, 1)`
-        ).run(student.personId, username, createPasswordHash(temporaryPassword), displayName);
-        user = { id: Number(result.lastInsertRowid), username };
-      }
-      db.prepare("update users set active = 1, updated_at = current_timestamp where id = ?").run(user.id);
+      const account = ensureClassOperatorAccount(db, student, req.body.username);
       db.prepare(
         "delete from class_monitors where user_id = ? and class_id in (select id from classes where archived = 1)"
-      ).run(user.id);
+      ).run(account.userId);
       const other = db.prepare(
         `select m.class_id as classId from class_monitors m join classes c on c.id = m.class_id
           where m.user_id = ? and m.class_id != ? and c.archived = 0`
-      ).get(user.id, classId) as { classId: number } | undefined;
+      ).get(account.userId, classId) as { classId: number } | undefined;
       if (other) throw new Error("该账号已经是其他班级的班长");
+      db.prepare("delete from class_attendance_assistants where class_id = ? and user_id = ?")
+        .run(classId, account.userId);
       db.prepare("delete from class_monitors where class_id = ?").run(classId);
       db.prepare("insert into class_monitors (class_id, enrollment_id, user_id, assigned_by) values (?, ?, ?, ?)")
-        .run(classId, enrollmentId, user.id, req.user!.id);
-      if (previous && previous.userId !== user.id) deactivateRolelessUser(db, previous.userId);
+        .run(classId, enrollmentId, account.userId, req.user!.id);
+      if (previous && previous.userId !== account.userId) deactivateRolelessUser(db, previous.userId);
       db.exec("commit"); res.json({
-        ok: true, userId: user.id, temporaryPassword, phone: student.phone,
-        username: user.username, loginIdentifier: user.username
+        ok: true, userId: account.userId, temporaryPassword: account.temporaryPassword, phone: student.phone,
+        username: account.username, loginIdentifier: account.username
       });
     } catch (error) { db.exec("rollback"); throw error; }
   });
@@ -1197,7 +1258,85 @@ export function createApiRouter(db: DatabaseSync) {
     res.json({ temporaryPassword });
   });
 
-  router.get("/classes/:classId/attendance/:lessonId", requireAuth, requireClassAccess(db), (req: AuthedRequest, res) => {
+  router.get("/classes/:classId/attendance-assistants", requireAuth, requireClassAccess(db, true), (req, res) => {
+    const classId = numberParam(req.params.classId);
+    const assistants = db.prepare(
+      `select a.enrollment_id as enrollmentId, a.user_id as userId,
+              coalesce(nullif(trim(p.name), ''), p.dharma_name) as name,
+              p.dharma_name as dharmaName, p.phone, u.username
+         from class_attendance_assistants a
+         join enrollments e on e.id = a.enrollment_id
+         join persons p on p.id = e.person_id
+         join users u on u.id = a.user_id
+        where a.class_id = ? order by a.assigned_at, a.enrollment_id`
+    ).all(classId);
+    res.json({ assistants });
+  });
+
+  router.post("/classes/:classId/attendance-assistants", requireAuth, requireClassAccess(db, true), (req: AuthedRequest, res) => {
+    const classId = numberParam(req.params.classId);
+    const enrollmentId = numberParam(req.body.studentId ?? req.body.enrollmentId, "学员");
+    const classRow = db.prepare("select archived, counselor_user_id as counselorUserId from classes where id = ?").get(classId) as
+      { archived: number; counselorUserId: number };
+    if (classRow.archived) return void res.status(400).json({ error: "已归档班级不能设置考勤员" });
+    const student = db.prepare(
+      `select e.id, e.person_id as personId, p.name, p.dharma_name as dharmaName, p.phone
+         from enrollments e
+         join persons p on p.id = e.person_id
+         join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+        where e.id = ? and e.class_id = ? and es.status = 'normal'`
+    ).get(enrollmentId, classId) as ClassOperatorStudent | undefined;
+    if (!student) return void res.status(400).json({ error: "考勤员必须从本班正常在册学员中选择" });
+    if (db.prepare("select 1 from class_attendance_assistants where class_id = ? and enrollment_id = ?").get(classId, enrollmentId)) {
+      return void res.status(409).json({ error: "该学员已经是本班考勤员" });
+    }
+    const existingUser = db.prepare("select id from users where person_id = ?").get(student.personId) as { id: number } | undefined;
+    if (existingUser && existingUser.id === classRow.counselorUserId) {
+      return void res.status(409).json({ error: "本班辅导员已经拥有全部考勤权限，无需重复设置" });
+    }
+    if (existingUser && db.prepare("select 1 from class_monitors where class_id = ? and user_id = ?").get(classId, existingUser.id)) {
+      return void res.status(409).json({ error: "本班班长已经拥有考勤权限，无需重复设置" });
+    }
+    db.exec("begin immediate");
+    try {
+      const account = ensureClassOperatorAccount(db, student, req.body.username);
+      db.prepare(
+        "insert into class_attendance_assistants (class_id, enrollment_id, user_id, assigned_by) values (?, ?, ?, ?)"
+      ).run(classId, enrollmentId, account.userId, req.user!.id);
+      db.exec("commit");
+      res.json({
+        ok: true, enrollmentId, userId: account.userId, username: account.username,
+        loginIdentifier: account.username, temporaryPassword: account.temporaryPassword
+      });
+    } catch (error) { db.exec("rollback"); throw error; }
+  });
+
+  router.delete("/classes/:classId/attendance-assistants/:enrollmentId", requireAuth, requireClassAccess(db, true), (req, res) => {
+    const classId = numberParam(req.params.classId);
+    const enrollmentId = numberParam(req.params.enrollmentId, "考勤员");
+    const current = db.prepare(
+      "select user_id as userId from class_attendance_assistants where class_id = ? and enrollment_id = ?"
+    ).get(classId, enrollmentId) as { userId: number } | undefined;
+    if (!current) return void res.status(404).json({ error: "考勤员权限不存在" });
+    db.prepare("delete from class_attendance_assistants where class_id = ? and enrollment_id = ?")
+      .run(classId, enrollmentId);
+    deactivateRolelessUser(db, current.userId);
+    res.json({ ok: true });
+  });
+
+  router.post("/classes/:classId/attendance-assistants/:enrollmentId/reset-password", requireAuth, requireClassAccess(db, true), (req, res) => {
+    const row = db.prepare(
+      "select user_id as userId from class_attendance_assistants where class_id = ? and enrollment_id = ?"
+    ).get(numberParam(req.params.classId), numberParam(req.params.enrollmentId, "考勤员")) as { userId: number } | undefined;
+    if (!row) return void res.status(404).json({ error: "考勤员权限不存在" });
+    const temporaryPassword = generateTemporaryPassword();
+    db.prepare("update users set password_hash = ?, must_change_password = 1, active = 1, updated_at = current_timestamp where id = ?")
+      .run(createPasswordHash(temporaryPassword), row.userId);
+    db.prepare("delete from sessions_auth where user_id = ?").run(row.userId);
+    res.json({ temporaryPassword });
+  });
+
+  router.get("/classes/:classId/attendance/:lessonId", requireAuth, requireClassAttendanceAccess(db), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId); const lessonId = numberParam(req.params.lessonId); const today = shanghaiToday();
     const lesson = getLesson(db, classId, lessonId); if (!lesson) return void res.status(404).json({ error: "课次不存在" });
     const courseStart = addDays(String(lesson.outlineDueDate), -6);
@@ -1245,12 +1384,12 @@ export function createApiRouter(db: DatabaseSync) {
       statuses: { outline: OUTLINE_STATUSES, groupStudy: GROUP_STUDY_STATUSES, classStudy: CLASS_STUDY_STATUSES } });
   });
 
-  router.put("/classes/:classId/attendance/:lessonId", requireAuth, requireClassAccess(db), (req: AuthedRequest, res) => {
+  router.put("/classes/:classId/attendance/:lessonId", requireAuth, requireClassAttendanceAccess(db), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId); const lessonId = numberParam(req.params.lessonId); const today = shanghaiToday();
     const lesson = getLesson(db, classId, lessonId); if (!lesson) return void res.status(404).json({ error: "课次不存在" });
     if (addDays(String(lesson.outlineDueDate), -6) > today) return void res.status(400).json({ error: "该课尚未开始" });
     freezeLessonRoster(db, lessonId);
-    if (req.classPermission === "monitor" && isMonitorLocked(String(lesson.classStudyDueDate), today)) return void res.status(403).json({ error: "该课已超过14天修改期" });
+    if (req.classPermission !== "counselor" && isMonitorLocked(String(lesson.classStudyDueDate), today)) return void res.status(403).json({ error: "该课已超过14天修改期" });
     const allowed: Record<Metric, readonly string[]> = { outline: OUTLINE_STATUSES, group_study: GROUP_STUDY_STATUSES, class_study: CLASS_STUDY_STATUSES };
     const due: Record<Metric, string> = { outline: String(lesson.outlineDueDate), group_study: String(lesson.groupStudyDueDate), class_study: String(lesson.classStudyDueDate) };
     const records = Array.isArray(req.body.records) ? req.body.records : [];
@@ -1278,7 +1417,7 @@ export function createApiRouter(db: DatabaseSync) {
         for (const [metric, raw] of inputs) {
           if (raw === undefined) continue;
           if (String(lesson.lessonType) === "review" && metric === "outline") continue;
-          if (req.classPermission === "monitor" && addDays(due[metric], -6) > today) throw new Error("该指标尚未开放填写");
+          if (req.classPermission !== "counselor" && addDays(due[metric], -6) > today) throw new Error("该指标尚未开放填写");
           const value = raw == null || raw === "" ? null : String(raw);
           if (value && !allowed[metric].includes(value)) throw new Error("考勤状态无效");
           if (metric === "outline" && value === "not_required") throw new Error("只有复习课可以使用不需要");
@@ -1292,7 +1431,7 @@ export function createApiRouter(db: DatabaseSync) {
     } catch (error) { db.exec("rollback"); throw error; }
   });
 
-  router.get("/classes/:classId/reports", requireAuth, requireClassAccess(db), (req, res) => {
+  router.get("/classes/:classId/reports", requireAuth, requireClassReportAccess(db), (req, res) => {
     const selection = reportSelection(req);
     res.json(buildClassReport(db, numberParam(req.params.classId), selection.range, undefined, selection.customRange));
   });

@@ -38,6 +38,7 @@ function runMigrations(db: DatabaseSync): void {
   if (!applied.has(7)) migrationSeven(db);
   if (!applied.has(8)) migrationEight(db);
   if (!applied.has(9)) migrationNine(db);
+  if (!applied.has(10)) migrationTen(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -421,6 +422,48 @@ function migrationNine(db: DatabaseSync): void {
         imported_at text not null default current_timestamp
       );
       insert into schema_migrations (version) values (9);
+    `);
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function migrationTen(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    db.exec(`
+      create table class_attendance_assistants (
+        class_id integer not null references classes(id) on delete cascade,
+        enrollment_id integer not null references enrollments(id) on delete cascade,
+        user_id integer not null references users(id),
+        assigned_by integer not null references users(id),
+        assigned_at text not null default current_timestamp,
+        primary key(class_id, user_id),
+        unique(class_id, enrollment_id)
+      );
+      create index class_attendance_assistants_user_idx
+        on class_attendance_assistants(user_id, class_id);
+      create trigger class_attendance_assistants_identity_insert
+      before insert on class_attendance_assistants
+      when not exists (
+        select 1 from enrollments e join users u on u.person_id = e.person_id
+         where e.id = new.enrollment_id and e.class_id = new.class_id and u.id = new.user_id
+      )
+      begin
+        select raise(abort, 'attendance assistant identity mismatch');
+      end;
+      create trigger class_attendance_assistants_identity_update
+      before update on class_attendance_assistants
+      when not exists (
+        select 1 from enrollments e join users u on u.person_id = e.person_id
+         where e.id = new.enrollment_id and e.class_id = new.class_id and u.id = new.user_id
+      )
+      begin
+        select raise(abort, 'attendance assistant identity mismatch');
+      end;
+      insert into schema_migrations (version) values (10);
     `);
     db.exec("commit");
   } catch (error) {

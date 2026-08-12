@@ -7,7 +7,7 @@
 - 新系统数据：`/opt/class-study-manager/data`
 - 新系统备份：`/opt/class-study-manager/backups`
 
-面向管理员、辅导员和班长的操作说明见：[简明使用说明](docs/简明使用说明.md)。
+面向管理员、辅导员、班长和考勤员的操作说明见：[简明使用说明](docs/简明使用说明.md)。
 
 ## 本机开发与验收
 
@@ -128,7 +128,27 @@ docker inspect class-study-manager --format '{{.State.Health.Status}} {{.HostCon
 - 新版：`http://jingxin.myds.me:3003/`
 - 旧版：`http://jingxin.myds.me:3002/`
 
-在生产环境完成管理员、辅导员和班长三种账号的冒烟测试：登录与首次改密、班级切换、敏感字段隔离、考勤保存、统计与导出。最后再次确认旧版 3002 可访问，且旧容器未被重启、旧数据库时间戳未因本次部署改变。
+在生产环境完成管理员、辅导员、班长和考勤员四种账号的冒烟测试：登录与首次改密、班级切换、敏感字段隔离、考勤保存、统计与导出权限。最后再次确认旧版 3002 可访问，且旧容器未被重启、旧数据库时间戳未因本次部署改变。
+
+## 已确认名单的增量更新
+
+`喝茶考勤表单-更新.xlsx` 使用专用更新器处理，不得交给首次导入命令。把文件临时复制进应用容器，先预演，再正式执行并把一次性密码文件复制到宿主机的私密位置：
+
+```bash
+docker cp /宿主机临时路径/喝茶考勤表单-更新.xlsx class-study-manager:/tmp/tea-roster-update.xlsx
+docker exec class-study-manager \
+  node dist/server/cli/updateTeaRoster.js /tmp/tea-roster-update.xlsx --preview
+docker exec class-study-manager \
+  node dist/server/cli/updateTeaRoster.js /tmp/tea-roster-update.xlsx \
+  --credentials /tmp/tea-roster-update-credentials.json
+docker cp class-study-manager:/tmp/tea-roster-update-credentials.json \
+  ./backups/tea-roster-update-credentials.json
+chmod 600 ./backups/tea-roster-update-credentials.json
+docker exec class-study-manager rm -f \
+  /tmp/tea-roster-update.xlsx /tmp/tea-roster-update-credentials.json
+```
+
+更新器会校验来源文件、更新前班级和人员状态；任一数据与预期不符都会整批回滚。新增和退学从下一课起生效，历史名单、考勤及修改记录不变。同一来源文件再次执行会安全跳过，不会重复创建账号。
 
 ## 备份
 

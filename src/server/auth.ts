@@ -72,21 +72,38 @@ export function loadSessionUser(db: DatabaseSync, token?: string): AuthUser | nu
 export function listClassAccesses(db: DatabaseSync, user: AuthUser): ClassAccess[] {
   if (user.isAdmin) {
     return (db.prepare(
-      `select id as classId, name as className, archived from classes order by archived, id desc`
+      `select id as classId, name as className, archived from classes
+       order by archived,
+                case when trim(name) glob '[0-9]*' and trim(name) not glob '*[^0-9]*' then 0 else 1 end,
+                case when trim(name) glob '[0-9]*' and trim(name) not glob '*[^0-9]*' then cast(trim(name) as integer) end,
+                id desc`
     ).all() as Array<Record<string, unknown>>).map((row) => ({
       classId: Number(row.classId), className: String(row.className), permission: "counselor", archived: Boolean(row.archived)
     }));
   }
   const rows = db.prepare(
     `select c.id as classId, c.name as className, c.archived,
-            case when ? = 1 and c.counselor_user_id = ? then 'counselor' else 'monitor' end as permission
+            case
+              when ? = 1 and c.counselor_user_id = ? then 'counselor'
+              when exists (select 1 from class_monitors m where m.class_id = c.id and m.user_id = ?) then 'monitor'
+              else 'attendance_assistant'
+            end as permission
        from classes c
-       left join class_monitors m on m.class_id = c.id
-      where (? = 1 and c.counselor_user_id = ?) or (m.user_id = ? and c.archived = 0)
-      order by c.archived, c.id desc`
-  ).all(user.canCounsel ? 1 : 0, user.id, user.canCounsel ? 1 : 0, user.id, user.id) as Array<Record<string, unknown>>;
+      where (? = 1 and c.counselor_user_id = ?)
+         or (c.archived = 0 and exists (select 1 from class_monitors m where m.class_id = c.id and m.user_id = ?))
+         or (c.archived = 0 and exists (select 1 from class_attendance_assistants a where a.class_id = c.id and a.user_id = ?))
+      order by c.archived,
+               case when trim(c.name) glob '[0-9]*' and trim(c.name) not glob '*[^0-9]*' then 0 else 1 end,
+               case when trim(c.name) glob '[0-9]*' and trim(c.name) not glob '*[^0-9]*' then cast(trim(c.name) as integer) end,
+               c.id desc`
+  ).all(
+    user.canCounsel ? 1 : 0, user.id, user.id,
+    user.canCounsel ? 1 : 0, user.id, user.id, user.id
+  ) as Array<Record<string, unknown>>;
   return rows.map((row) => ({
     classId: Number(row.classId), className: String(row.className),
-    permission: row.permission === "counselor" ? "counselor" : "monitor", archived: Boolean(row.archived)
+    permission: row.permission === "counselor" ? "counselor"
+      : row.permission === "monitor" ? "monitor" : "attendance_assistant",
+    archived: Boolean(row.archived)
   }));
 }

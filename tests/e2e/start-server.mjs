@@ -51,6 +51,24 @@ db.prepare(
   "insert into class_monitors (class_id, enrollment_id, user_id, assigned_by) values (?, ?, ?, ?)",
 ).run(classId, enrollmentId, monitorUserId, admin.id);
 
+const assistantPersonId = Number(db.prepare(
+  "insert into persons (name, dharma_name, phone) values ('考勤协助', '善勤', '+8613700000998')",
+).run().lastInsertRowid);
+const assistantEnrollmentId = Number(db.prepare(
+  "insert into enrollments (class_id, person_id, active_from_sequence) values (?, ?, 1)",
+).run(classId, assistantPersonId).lastInsertRowid);
+db.prepare(
+  "insert into group_assignments (enrollment_id, group_id, effective_from_sequence) values (?, ?, 1)",
+).run(assistantEnrollmentId, groups[1].id);
+const assistantUserId = Number(db.prepare(
+  `insert into users (person_id, username, password_hash, display_name, must_change_password)
+   values (?, 'attendance-e2e', ?, '测试考勤员', 0)`,
+).run(assistantPersonId, createPasswordHash("E2eAttendance!2026")).lastInsertRowid);
+db.prepare(
+  `insert into class_attendance_assistants
+     (class_id, enrollment_id, user_id, assigned_by) values (?, ?, ?, ?)`,
+).run(classId, assistantEnrollmentId, assistantUserId, admin.id);
+
 const today = shanghaiToday();
 const dueDates = [addDays(today, -14), addDays(today, -7), addDays(today, 7)];
 const lessonIds = dueDates.map((dueDate, index) => Number(db.prepare(
@@ -75,6 +93,11 @@ for (const lessonId of lessonIds.slice(0, 2)) {
        (lesson_id, enrollment_id, student_name, dharma_name, group_id, group_name)
      values (?, ?, '测试学员', '善测', ?, ?)`,
   ).run(lessonId, enrollmentId, groups[0].id, groups[0].name);
+  db.prepare(
+    `insert into lesson_roster
+       (lesson_id, enrollment_id, student_name, dharma_name, group_id, group_name)
+     values (?, ?, '考勤协助', '善勤', ?, ?)`,
+  ).run(lessonId, assistantEnrollmentId, groups[1].id, groups[1].name);
 }
 const firstRoster = db.prepare("select id from lesson_roster where lesson_id = ?").get(lessonIds[0]);
 const insertAttendance = db.prepare(
