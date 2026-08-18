@@ -2,6 +2,7 @@ import React, { Component, type ErrorInfo, type ReactNode } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./styles.css";
+import { installGlobalErrorReporting, reportClientError } from "./clientErrorReporter";
 
 interface AppErrorBoundaryState {
   failed: boolean;
@@ -16,6 +17,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, AppErrorBounda
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error("Application render failed", error, info.componentStack);
+    reportClientError(error, "react", info.componentStack ?? "");
   }
 
   render(): ReactNode {
@@ -34,6 +36,8 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, AppErrorBounda
     );
   }
 }
+
+installGlobalErrorReporting();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

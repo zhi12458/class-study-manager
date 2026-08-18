@@ -49,6 +49,8 @@ id -g
 - 当前入口是 HTTP，因此 `COOKIE_SECURE=false`。以后通过 HTTPS 反向代理访问时，应改为 `true`。
 - 应用容器固定使用容器端口 3000，默认映射为宿主机端口 3003。
 - `data` 和 `backups` 都是项目目录下的独立绑定目录，不与旧系统的数据卷共用。
+- API 请求、登录安全事件、浏览器异常及关键写操作会记录请求编号；系统审计默认保留 180 天，考勤修改历史永久保留。
+- `TRUST_CLOUDFLARE` 默认关闭。只有公网入口已锁定为可信 Cloudflare Tunnel/代理、外部无法绕过时才能开启，否则客户端可以伪造来源地址。
 
 ## AMD64 miniPC 部署
 
@@ -176,6 +178,22 @@ docker compose logs --tail=200 app backup
 ```
 
 健康接口应返回类似 `{"ok":true,"service":"class-study-manager"}`。如果应用启动失败，优先检查 `.env` 是否存在、`ADMIN_PASSWORD` 是否已替换、3003 是否冲突，以及 `data` 目录是否可由 `APP_UID:APP_GID` 写入。
+
+每个 API 响应都带 `X-Request-ID`。用户看到错误页面或接口返回请求编号时，可按编号检索结构化容器日志：
+
+```bash
+docker logs --since 24h --timestamps class-study-manager 2>&1 | grep '页面或接口给出的请求编号'
+docker logs --since 24h --timestamps class-study-manager
+```
+
+管理员也可在登录后读取最近的持久审计事件：
+
+```bash
+curl -b 'class_study_session=管理员会话Cookie' \
+  'http://127.0.0.1:3003/api/admin/audit-events?limit=100'
+```
+
+审计记录包括登录成功、失败、限速、浏览器异常以及写操作的接口、操作人、班级、结果和来源地址；不会保存密码、Cookie、手机号、备注或考勤提交正文。Docker 使用本地轮转日志，应用日志单文件最多 10MB、保留 5 份。系统审计按 `AUDIT_RETENTION_DAYS` 清理，默认 180 天；`attendance_audit` 中的逐项考勤修改历史不会自动删除。
 
 ## 公网安全说明
 

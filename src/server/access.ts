@@ -5,6 +5,9 @@ import type { AuthUser, ClassPermission } from "../shared/types.js";
 export interface AuthedRequest extends Request {
   user?: AuthUser;
   classPermission?: ClassPermission;
+  requestId?: string;
+  clientIp?: string | null;
+  auditUserId?: number;
 }
 
 type ClassAccessScope = "read" | "manage" | "schedule" | "attendance" | "report";

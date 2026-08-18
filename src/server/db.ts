@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createPasswordHash } from "./auth.js";
+import { pruneSystemAuditEvents } from "./observability.js";
 import { DEFAULT_COURSES, WISDOM_LIFE_COURSES } from "../shared/courseCatalog.js";
 
 export function getDefaultDbPath(): string {
@@ -16,6 +17,7 @@ export function openDatabase(dbPath = getDefaultDbPath()): DatabaseSync {
   db.exec("pragma busy_timeout = 5000");
   runMigrations(db);
   seedAdmin(db);
+  pruneSystemAuditEvents(db);
   return db;
 }
 
@@ -39,6 +41,7 @@ function runMigrations(db: DatabaseSync): void {
   if (!applied.has(8)) migrationEight(db);
   if (!applied.has(9)) migrationNine(db);
   if (!applied.has(10)) migrationTen(db);
+  if (!applied.has(11)) migrationEleven(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -464,6 +467,36 @@ function migrationTen(db: DatabaseSync): void {
         select raise(abort, 'attendance assistant identity mismatch');
       end;
       insert into schema_migrations (version) values (10);
+    `);
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function migrationEleven(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    db.exec(`
+      create table system_audit_events (
+        id integer primary key autoincrement,
+        event_type text not null,
+        request_id text,
+        user_id integer references users(id) on delete set null,
+        class_id integer references classes(id) on delete set null,
+        outcome text not null check(outcome in ('success', 'denied', 'failure')),
+        http_status integer,
+        method text,
+        path text,
+        client_ip text,
+        details_json text,
+        created_at text not null default current_timestamp
+      );
+      create index system_audit_created_idx on system_audit_events(created_at desc);
+      create index system_audit_event_idx on system_audit_events(event_type, created_at desc);
+      create index system_audit_user_idx on system_audit_events(user_id, created_at desc);
+      insert into schema_migrations (version) values (11);
     `);
     db.exec("commit");
   } catch (error) {

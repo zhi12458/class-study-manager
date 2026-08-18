@@ -93,4 +93,72 @@ describe("登录与响应安全", () => {
       await rm(clientDir, { recursive: true, force: true });
     }
   });
+
+  it("每个API请求有可关联编号，并持久记录登录与脱敏写操作审计", async () => {
+    const db = openDatabase(":memory:");
+    const server = await startTestApi(db);
+    try {
+      const client = server.client();
+      const failed = await client.post("/auth/login", { identifier: "admin", password: "wrong-password" });
+      const failedRequestId = failed.headers.get("x-request-id");
+      expect(failedRequestId).toMatch(/^[0-9a-f-]{36}$/);
+      const loginFailure = db.prepare(
+        "select request_id as requestId, event_type as eventType, details_json as detailsJson from system_audit_events where event_type = 'login_failed'"
+      ).get() as { requestId: string; eventType: string; detailsJson: string };
+      expect(loginFailure.requestId).toBe(failedRequestId);
+      expect(loginFailure.detailsJson).not.toContain("admin");
+      expect(loginFailure.detailsJson).not.toContain("wrong-password");
+
+      const loggedIn = await client.post("/auth/login", { identifier: "admin", password: "admin12345" });
+      expect(loggedIn.status).toBe(200);
+      expect(db.prepare("select count(*) as count from system_audit_events where event_type = 'login_succeeded'").get())
+        .toMatchObject({ count: 1 });
+
+      const updated = await client.patch("/auth/profile", { displayName: "日志测试管理员" });
+      expect(updated.status).toBe(200);
+      await new Promise((resolve) => setImmediate(resolve));
+      const mutation = db.prepare(
+        "select user_id as userId, class_id as classId, path, details_json as detailsJson from system_audit_events where event_type = 'api_mutation' and path = '/api/auth/profile' order by id desc limit 1"
+      ).get() as { userId: number; classId: null; path: string; detailsJson: string };
+      expect(mutation).toMatchObject({ userId: 1, classId: null, path: "/api/auth/profile" });
+      expect(mutation.detailsJson).toContain("displayName");
+      expect(mutation.detailsJson).not.toContain("日志测试管理员");
+    } finally {
+      await server.close();
+      db.close();
+    }
+  });
+
+  it("浏览器异常会脱敏后保存，且只有管理员能读取审计列表", async () => {
+    const db = openDatabase(":memory:");
+    const server = await startTestApi(db);
+    try {
+      const anonymous = server.client();
+      const reported = await anonymous.post<{ requestId: string }>("/client-errors", {
+        source: "react",
+        message: "手机号 13800138000 渲染失败",
+        stack: "Error at /attendance?token=secret-value",
+        page: "/attendance?phone=13800138000",
+        assetVersion: "/assets/index-test.js",
+      });
+      expect(reported.status).toBe(202);
+      expect(reported.body.requestId).toBe(reported.headers.get("x-request-id"));
+      const stored = db.prepare(
+        "select details_json as detailsJson from system_audit_events where event_type = 'client_error'"
+      ).get() as { detailsJson: string };
+      expect(stored.detailsJson).toContain("[已隐藏手机号]");
+      expect(stored.detailsJson).not.toContain("13800138000");
+      expect(stored.detailsJson).not.toContain("secret-value");
+
+      expect((await anonymous.get("/admin/audit-events")).status).toBe(401);
+      const admin = server.client();
+      expect((await admin.post("/auth/login", { identifier: "admin", password: "admin12345" })).status).toBe(200);
+      const list = await admin.get<{ events: Array<{ eventType: string }> }>("/admin/audit-events?limit=10");
+      expect(list.status).toBe(200);
+      expect(list.body.events.some((event) => event.eventType === "client_error")).toBe(true);
+    } finally {
+      await server.close();
+      db.close();
+    }
+  });
 });

@@ -16,11 +16,18 @@ services:
       ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:?请先在 .env 中设置 ADMIN_PASSWORD}"
       COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+      AUDIT_RETENTION_DAYS: "${AUDIT_RETENTION_DAYS:-180}"
+      TRUST_CLOUDFLARE: "${TRUST_CLOUDFLARE:-false}"
     ports:
       - "${APP_PORT:-3003}:3000"
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -52,5 +59,10 @@ services:
       - ./backups:/backups
     network_mode: none
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     security_opt:
       - no-new-privileges:true

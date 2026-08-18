@@ -3,6 +3,7 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { createApiRouter } from "./routes.js";
 import { securityHeaders } from "./security.js";
+import { requestObservability } from "./observability.js";
 
 export interface AppOptions {
   clientDir?: string;
@@ -13,7 +14,7 @@ export function createApp(db: DatabaseSync, options: AppOptions = {}) {
   const app = express();
   app.disable("x-powered-by");
   app.use(securityHeaders);
-  app.use("/api", (_req, res, next) => {
+  app.use("/api", requestObservability(db), (_req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     next();
   }, createApiRouter(db));

@@ -36,6 +36,9 @@ import {
 } from "./services/accounts.js";
 import { LoginAttemptLimiter } from "./security.js";
 import { badRequest, classifyHttpError } from "./httpErrors.js";
+import {
+  identifierFingerprint, logError, safelyRecordAuditEvent
+} from "./observability.js";
 
 const COOKIE = "class_study_session";
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -394,11 +397,55 @@ function updateEnrollmentRoles(
 export function createApiRouter(db: DatabaseSync) {
   const router = express.Router();
   const loginLimiter = new LoginAttemptLimiter();
+  const clientErrorLimiter = new LoginAttemptLimiter(20, 60_000, 5_000);
   router.use(cookieParser());
   router.use(express.json({ limit: "4mb" }));
   router.use(loadUser(db));
 
   router.get("/health", (_req, res) => res.json({ ok: true, service: "class-study-manager" }));
+
+  router.post("/client-errors", (req: AuthedRequest, res) => {
+    const limiterKey = req.clientIp ?? "unknown";
+    const retryAfter = clientErrorLimiter.retryAfterSeconds(limiterKey);
+    if (retryAfter > 0) {
+      res.setHeader("Retry-After", String(retryAfter));
+      return void res.status(429).json({ error: "错误上报过于频繁，请稍后再试" });
+    }
+    clientErrorLimiter.recordFailure(limiterKey);
+    const sanitize = (value: unknown, maxLength: number) => String(value ?? "")
+      .slice(0, maxLength)
+      .replace(/(?:\+?86[- ]?)?1[3-9]\d{9}/g, "[已隐藏手机号]")
+      .replace(/([?&](?:token|password|phone)=)[^&#\s]+/gi, "$1[已隐藏]");
+    const message = sanitize(req.body.message, 500);
+    const stack = sanitize(req.body.stack, 4_000);
+    const componentStack = sanitize(req.body.componentStack, 4_000);
+    const source = sanitize(req.body.source, 40) || "unknown";
+    const page = sanitize(req.body.page, 300).split("?", 1)[0];
+    const assetVersion = sanitize(req.body.assetVersion, 300).split("?", 1)[0];
+    if (!message && !stack && !componentStack) return void res.status(400).json({ error: "错误信息为空" });
+    const details = { source, page, assetVersion, message, stack, componentStack };
+    safelyRecordAuditEvent(db, {
+      eventType: "client_error",
+      requestId: req.requestId,
+      userId: req.user?.id,
+      outcome: "failure",
+      httpStatus: 202,
+      method: req.method,
+      path: "/api/client-errors",
+      clientIp: req.clientIp,
+      details,
+    });
+    logError("client_error", new Error(message || "Browser client error"), {
+      requestId: req.requestId,
+      userId: req.user?.id ?? null,
+      clientIp: req.clientIp,
+      source,
+      page,
+      assetVersion,
+      browserStack: stack || componentStack || undefined,
+    });
+    res.status(202).json({ ok: true, requestId: req.requestId });
+  });
 
   router.get("/course-catalog", requireAuth, (_req, res) => {
     res.json({ series: listCourseCatalog(db) });
@@ -409,19 +456,37 @@ export function createApiRouter(db: DatabaseSync) {
     res.json({ seriesCount: series.length, itemCount: series.reduce((sum, item) => sum + item.items.length, 0) });
   });
 
-  router.post("/auth/login", (req, res) => {
+  router.post("/auth/login", (req: AuthedRequest, res) => {
     const identifier = String(req.body.identifier ?? req.body.username ?? req.body.phone ?? "").trim();
     const password = String(req.body.password ?? "");
-    if (!identifier || !password) return void res.status(400).json({ error: "请输入账号和密码" });
-    if (identifier.length > 64 || password.length > 256) return void res.status(400).json({ error: "账号或密码长度无效" });
+    if (!identifier || !password) {
+      safelyRecordAuditEvent(db, {
+        eventType: "login_invalid", requestId: req.requestId, outcome: "denied", httpStatus: 400,
+        method: req.method, path: "/api/auth/login", clientIp: req.clientIp, details: { reason: "missing_credentials" },
+      });
+      return void res.status(400).json({ error: "请输入账号和密码" });
+    }
+    if (identifier.length > 64 || password.length > 256) {
+      safelyRecordAuditEvent(db, {
+        eventType: "login_invalid", requestId: req.requestId, outcome: "denied", httpStatus: 400,
+        method: req.method, path: "/api/auth/login", clientIp: req.clientIp, details: { reason: "invalid_length" },
+      });
+      return void res.status(400).json({ error: "账号或密码长度无效" });
+    }
     let normalized = identifier;
     if (identifier !== "admin" && !identifier.startsWith("admin")) {
       try { normalized = normalizePhone(identifier); } catch { /* custom admin name remains usable */ }
     }
-    const attemptKey = `${req.ip}|${normalized.toLowerCase()}`;
+    const accountFingerprint = identifierFingerprint(normalized);
+    const attemptKey = `${req.clientIp ?? "unknown"}|${accountFingerprint}`;
     const retryAfter = loginLimiter.retryAfterSeconds(attemptKey);
     if (retryAfter > 0) {
       res.setHeader("Retry-After", String(retryAfter));
+      safelyRecordAuditEvent(db, {
+        eventType: "login_rate_limited", requestId: req.requestId, outcome: "denied", httpStatus: 429,
+        method: req.method, path: "/api/auth/login", clientIp: req.clientIp,
+        details: { accountFingerprint, retryAfterSeconds: retryAfter },
+      });
       return void res.status(429).json({ error: "登录失败次数过多，请稍后再试" });
     }
     const user = db.prepare("select id, password_hash as passwordHash from users where username = ? and active = 1")
@@ -429,12 +494,46 @@ export function createApiRouter(db: DatabaseSync) {
     const passwordMatches = verifyPassword(password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
     if (!user || !passwordMatches) {
       loginLimiter.recordFailure(attemptKey);
+      safelyRecordAuditEvent(db, {
+        eventType: "login_failed", requestId: req.requestId, userId: user?.id, outcome: "denied", httpStatus: 401,
+        method: req.method, path: "/api/auth/login", clientIp: req.clientIp, details: { accountFingerprint },
+      });
       return void res.status(401).json({ error: "账号或密码不正确" });
     }
     loginLimiter.clear(attemptKey);
     const token = createSession(db, user.id);
+    req.auditUserId = user.id;
     res.cookie(COOKIE, token, { httpOnly: true, sameSite: "strict", secure: process.env.COOKIE_SECURE === "true", maxAge: 7 * 86_400_000 });
+    safelyRecordAuditEvent(db, {
+      eventType: "login_succeeded", requestId: req.requestId, userId: user.id, outcome: "success", httpStatus: 200,
+      method: req.method, path: "/api/auth/login", clientIp: req.clientIp, details: { accountFingerprint },
+    });
     res.json({ ok: true });
+  });
+
+  router.get("/admin/audit-events", requireAdmin, (req, res) => {
+    const requestedLimit = Number(req.query.limit ?? 100);
+    const limit = Number.isInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 500) : 100;
+    const eventType = String(req.query.eventType ?? "").trim().slice(0, 80);
+    const rows = (eventType
+      ? db.prepare(
+        `select id, event_type as eventType, request_id as requestId, user_id as userId, class_id as classId,
+                outcome, http_status as httpStatus, method, path, client_ip as clientIp,
+                details_json as detailsJson, created_at as createdAt
+           from system_audit_events where event_type = ? order by id desc limit ?`
+      ).all(eventType, limit)
+      : db.prepare(
+        `select id, event_type as eventType, request_id as requestId, user_id as userId, class_id as classId,
+                outcome, http_status as httpStatus, method, path, client_ip as clientIp,
+                details_json as detailsJson, created_at as createdAt
+           from system_audit_events order by id desc limit ?`
+      ).all(limit)) as Array<Record<string, unknown>>;
+    res.json({ events: rows.map((row) => {
+      const detailsJson = row.detailsJson;
+      const { detailsJson: _discarded, ...event } = row;
+      try { return { ...event, details: detailsJson ? JSON.parse(String(detailsJson)) : null }; }
+      catch { return { ...event, details: null }; }
+    }) });
   });
 
   router.get("/auth/me", (req: AuthedRequest, res) => {
@@ -1489,8 +1588,22 @@ export function createApiRouter(db: DatabaseSync) {
 
   router.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     const publicError = classifyHttpError(error);
-    const requestId = randomUUID();
-    if (publicError.internal) console.error(`[${requestId}]`, error);
+    const requestId = (_req as AuthedRequest).requestId ?? randomUUID();
+    if (publicError.internal) logError("unhandled_api_error", error, {
+      requestId, method: _req.method, path: _req.originalUrl.split("?", 1)[0], userId: (_req as AuthedRequest).user?.id ?? null,
+    });
+    if (publicError.internal) safelyRecordAuditEvent(db, {
+      eventType: "server_error",
+      requestId,
+      userId: (_req as AuthedRequest).user?.id,
+      classId: Number.isInteger(Number(_req.params.classId)) ? Number(_req.params.classId) : null,
+      outcome: "failure",
+      httpStatus: publicError.status,
+      method: _req.method,
+      path: _req.originalUrl.split("?", 1)[0],
+      clientIp: (_req as AuthedRequest).clientIp,
+      details: { errorCode: publicError.code ?? null },
+    });
     const body: Record<string, string> = { error: publicError.message };
     if (publicError.code) body.code = publicError.code;
     if (publicError.internal) body.requestId = requestId;
