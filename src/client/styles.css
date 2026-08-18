@@ -84,6 +84,11 @@ p { color: var(--muted); line-height: 1.65; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+.fatal-error-page { min-height: 100vh; padding: 24px; display: grid; place-items: center; background: linear-gradient(145deg, #e7f5ff, #f7fbff); }
+.fatal-error-card { width: min(100%, 520px); padding: 38px; display: grid; justify-items: center; gap: 18px; text-align: center; background: #fff; border: 1px solid var(--line); border-radius: 22px; box-shadow: var(--shadow); }
+.fatal-error-icon { width: 56px; height: 56px; display: grid; place-items: center; color: #fff; background: var(--red); border-radius: 50%; font-size: 30px; font-weight: 800; }
+.fatal-error-card p { max-width: 390px; }
+
 .login-page { position: relative; isolation: isolate; min-height: 100vh; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(390px, 480px); align-items: center; gap: clamp(50px, 8vw, 120px); padding: clamp(30px, 7vw, 100px); background:
   radial-gradient(ellipse at 26% 20%, rgba(255,255,255,.94) 0 9%, transparent 10%),
   radial-gradient(ellipse at 17% 30%, rgba(255,255,255,.7) 0 7%, transparent 8%),

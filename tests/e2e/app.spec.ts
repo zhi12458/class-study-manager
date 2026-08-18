@@ -24,6 +24,14 @@ test.beforeEach(async ({ page }) => {
   await login(page);
 });
 
+test("页面声明禁止自动翻译以保护动态考勤界面", async ({ page }) => {
+  await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+  await expect(page.locator("html")).toHaveAttribute("translate", "no");
+  await expect(page.locator('meta[name="google"]')).toHaveAttribute("content", "notranslate");
+  await navigate(page, "考勤登记");
+  await expect(page.getByRole("heading", { name: "考勤登记" })).toBeVisible();
+});
+
 test("历史自定义范围驱动页面、Excel和CSV使用同一日期", async ({ page }) => {
   await navigate(page, "完成统计");
   await page.getByRole("tab", { name: "历史" }).click();
