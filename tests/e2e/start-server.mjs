@@ -115,7 +115,7 @@ const insertAttendance = db.prepare(
    values (?, ?, ?, ?, ?)`,
 );
 insertAttendance.run(lessonIds[0], firstRoster.id, "outline", "yes", admin.id);
-insertAttendance.run(lessonIds[0], firstRoster.id, "group_study", "present", admin.id);
+insertAttendance.run(lessonIds[0], firstRoster.id, "group_study", "onsite", admin.id);
 insertAttendance.run(lessonIds[0], firstRoster.id, "class_study", "online", admin.id);
 db.close();
 

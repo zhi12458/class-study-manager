@@ -70,6 +70,7 @@ import {
   type ReportRange,
   type Student
 } from "./api";
+import { ATTENDANCE_SCHEMA_VERSION } from "../shared/types";
 
 const METRIC_LABELS: Record<Metric, string> = {
   outline: "导图/提纲",
@@ -90,14 +91,18 @@ const OUTLINE_OPTIONS: Array<{ value: OutlineStatus; label: string }> = [
   { value: "no", label: "否" }
 ];
 const GROUP_OPTIONS: Array<{ value: GroupStudyStatus; label: string }> = [
-  { value: "present", label: "出勤" },
-  { value: "absent", label: "缺勤" }
+  { value: "onsite", label: "现场" },
+  { value: "online", label: "网络" },
+  { value: "official_duty", label: "公差" },
+  { value: "absent", label: "旷课" },
+  { value: "observer", label: "旁听" }
 ];
 const CLASS_OPTIONS: Array<{ value: ClassStudyStatus; label: string }> = [
   { value: "onsite", label: "现场" },
   { value: "online", label: "网络" },
-  { value: "share", label: "分享" },
-  { value: "absent", label: "缺勤" }
+  { value: "official_duty", label: "公差" },
+  { value: "absent", label: "旷课" },
+  { value: "observer", label: "旁听" }
 ];
 const ENROLLMENT_STATUS_LABELS: Record<EnrollmentStatus, string> = { normal: "正常", leave: "休学", withdrawn: "退学" };
 const ENROLLMENT_ROLE_LABELS: Record<EnrollmentRole, string> = {
@@ -1857,13 +1862,22 @@ function normalizeOutline(value: unknown): OutlineStatus | null {
 
 function normalizeGroupStudy(value: unknown): GroupStudyStatus | null {
   if (value == null || value === "") return null;
-  const map: Record<string, GroupStudyStatus> = { present: "present", absent: "absent", 出勤: "present", 缺勤: "absent" };
+  const map: Record<string, GroupStudyStatus> = {
+    onsite: "onsite", online: "online", official_duty: "official_duty", absent: "absent", observer: "observer",
+    present: "onsite", share: "observer", 现场: "onsite", 网络: "online", 公差: "official_duty",
+    出勤: "onsite", 缺勤: "absent", 旷课: "absent", 分享: "observer", 旁听: "observer"
+  };
   return map[String(value)] ?? null;
 }
 
 function normalizeClassStudy(value: unknown): ClassStudyStatus | null {
   if (value == null || value === "") return null;
-  const map: Record<string, ClassStudyStatus> = { onsite: "onsite", online: "online", makeup: "absent", share: "share", sharing: "share", absent: "absent", 现场: "onsite", 网络: "online", 补课: "absent", 分享: "share", 缺勤: "absent" };
+  const map: Record<string, ClassStudyStatus> = {
+    onsite: "onsite", online: "online", official_duty: "official_duty", absent: "absent", observer: "observer",
+    present: "onsite", makeup: "absent", share: "observer", sharing: "observer", 现场: "onsite", 网络: "online",
+    公差: "official_duty", 出勤: "onsite", 补课: "absent", 缺勤: "absent", 旷课: "absent",
+    分享: "observer", 旁听: "observer"
+  };
   return map[String(value)] ?? null;
 }
 
@@ -1916,6 +1930,10 @@ function AttendancePage({ currentClass, user }: { currentClass: ClassSummary; us
     setLoading(true); setNotice(null);
     try {
       const data = await apiJson<Record<string, unknown>>(`/api/classes/${currentClass.id}/attendance/${targetId}`);
+      const attendanceSchemaVersion = Number(data.attendanceSchemaVersion);
+      if (attendanceSchemaVersion !== ATTENDANCE_SCHEMA_VERSION) {
+        throw new Error("考勤页面版本与服务器不一致，请刷新页面后重试");
+      }
       const lessonRaw = ((data.lesson ?? {}) || {}) as Record<string, unknown>;
       const lesson = Object.keys(lessonRaw).length ? lessonFromRaw(lessonRaw) : lessons.find((item) => item.id === targetId)!;
       const rawRows = asList<Record<string, unknown>>(data.records ?? data.rows ?? data, "records", "rows");
@@ -1923,6 +1941,7 @@ function AttendancePage({ currentClass, user }: { currentClass: ClassSummary; us
       setRows(normalizedRows);
       setBaselineRows(normalizedRows);
       setPayload({
+        attendanceSchemaVersion,
         lesson,
         rows: normalizedRows,
         canEdit: data.canEdit == null ? true : Boolean(data.canEdit),
@@ -1980,7 +1999,7 @@ function AttendancePage({ currentClass, user }: { currentClass: ClassSummary; us
     try {
       await apiJson(`/api/classes/${currentClass.id}/attendance/${lessonId}`, {
         method: "PUT",
-        body: JSON.stringify({ records: rows.map((row) => ({
+        body: JSON.stringify({ attendanceSchemaVersion: ATTENDANCE_SCHEMA_VERSION, records: rows.map((row) => ({
           studentId: row.studentId,
           ...(metricEditable("outline") ? { outlineStatus: row.outline } : {}),
           ...(metricEditable("group_study") ? { groupStudyStatus: row.groupStudy } : {}),

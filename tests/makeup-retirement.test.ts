@@ -14,7 +14,25 @@ describe("补课状态退役迁移", () => {
       legacy.exec(`
         drop trigger attendance_entries_reject_makeup_insert;
         drop trigger attendance_entries_reject_makeup_update;
-        delete from schema_migrations where version = 12;
+        drop trigger attendance_entries_reject_legacy_study_insert;
+        drop trigger attendance_entries_reject_legacy_study_update;
+        delete from schema_migrations where version in (12, 14);
+
+        alter table attendance_entries rename to attendance_entries_latest;
+        create table attendance_entries (
+          id integer primary key autoincrement,
+          lesson_id integer not null references lessons(id) on delete cascade,
+          lesson_roster_id integer not null references lesson_roster(id) on delete cascade,
+          metric text not null check(metric in ('outline', 'group_study', 'class_study')),
+          status text not null check(status in (
+            'yes', 'no', 'not_required', 'present', 'absent', 'onsite', 'online', 'makeup', 'share'
+          )),
+          modified_by integer not null references users(id),
+          modified_at text not null default current_timestamp,
+          unique(lesson_roster_id, metric)
+        );
+        drop table attendance_entries_latest;
+        create index attendance_lesson_idx on attendance_entries(lesson_id);
       `);
       const adminId = Number((legacy.prepare("select id from users where is_admin = 1").get() as { id: number }).id);
       const classId = Number(legacy.prepare(

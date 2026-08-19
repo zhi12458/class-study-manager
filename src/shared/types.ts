@@ -7,13 +7,18 @@ export type LessonType = (typeof LESSON_TYPES)[number];
 export const METRICS = ["outline", "group_study", "class_study"] as const;
 export type Metric = (typeof METRICS)[number];
 
+export const ATTENDANCE_SCHEMA_VERSION = 2;
+
 export const OUTLINE_STATUSES = ["yes", "no", "not_required"] as const;
 export type OutlineStatus = (typeof OUTLINE_STATUSES)[number];
 
-export const GROUP_STUDY_STATUSES = ["present", "absent"] as const;
+export const STUDY_STATUSES = ["onsite", "online", "official_duty", "absent", "observer"] as const;
+export type StudyStatus = (typeof STUDY_STATUSES)[number];
+
+export const GROUP_STUDY_STATUSES = STUDY_STATUSES;
 export type GroupStudyStatus = (typeof GROUP_STUDY_STATUSES)[number];
 
-export const CLASS_STUDY_STATUSES = ["onsite", "online", "share", "absent"] as const;
+export const CLASS_STUDY_STATUSES = STUDY_STATUSES;
 export type ClassStudyStatus = (typeof CLASS_STUDY_STATUSES)[number];
 export type AttendanceStatus = OutlineStatus | GroupStudyStatus | ClassStudyStatus;
 

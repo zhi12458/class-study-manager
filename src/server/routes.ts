@@ -5,7 +5,7 @@ import multer from "multer";
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import {
-  CADENCE_MODES, CLASS_STUDY_STATUSES, GROUP_STUDY_STATUSES, LESSON_TYPES,
+  ATTENDANCE_SCHEMA_VERSION, CADENCE_MODES, CLASS_STUDY_STATUSES, GROUP_STUDY_STATUSES, LESSON_TYPES,
   OUTLINE_STATUSES, REPORT_RANGES, ENROLLMENT_STATUSES, type AttendanceStatus, type CadenceMode,
   type EnrollmentRole, type EnrollmentStatus, type Metric, type ReportRange
 } from "../shared/types.js";
@@ -101,8 +101,8 @@ function sendCsv(res: Response, filename: string, rows: Array<Record<string, unk
 
 const METRIC_NAMES: Record<string, string> = { outline: "导图/提纲", group_study: "组修", class_study: "班修" };
 const STATUS_NAMES: Record<string, string> = {
-  yes: "是", no: "否", not_required: "不需要", present: "出勤", absent: "缺勤",
-  onsite: "现场", online: "网络", share: "分享"
+  yes: "是", no: "否", not_required: "不需要", onsite: "现场", online: "网络",
+  official_duty: "公差", absent: "旷课", observer: "旁听"
 };
 
 function buildCsvExportRows(report: ReturnType<typeof buildClassReport>): Array<Record<string, unknown>> {
@@ -1576,13 +1576,19 @@ export function createApiRouter(db: DatabaseSync) {
       class_study: addDays(String(lesson.classStudyDueDate), -6) <= today
     };
     const canEdit = courseStart <= today && (req.classPermission === "counselor" || !locked);
-    res.json({ lesson: { ...lesson, lockedForMonitor: locked }, rows, records: rows, history, canEdit, lockedForMonitor: locked, openMetrics,
+    res.json({ attendanceSchemaVersion: ATTENDANCE_SCHEMA_VERSION, lesson: { ...lesson, lockedForMonitor: locked }, rows, records: rows, history, canEdit, lockedForMonitor: locked, openMetrics,
       statuses: { outline: OUTLINE_STATUSES, groupStudy: GROUP_STUDY_STATUSES, classStudy: CLASS_STUDY_STATUSES } });
   });
 
   router.put("/classes/:classId/attendance/:lessonId", requireAuth, requireClassAttendanceAccess(db), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId); const lessonId = numberParam(req.params.lessonId); const today = shanghaiToday();
     const lesson = getLesson(db, classId, lessonId); if (!lesson) return void res.status(404).json({ error: "课次不存在" });
+    if (req.body?.attendanceSchemaVersion !== ATTENDANCE_SCHEMA_VERSION) {
+      return void res.status(409).json({
+        error: "考勤页面已经更新，请刷新页面后重新操作",
+        code: "ATTENDANCE_SCHEMA_VERSION_MISMATCH",
+      });
+    }
     if (addDays(String(lesson.outlineDueDate), -6) > today) return void res.status(400).json({ error: "该课尚未开始" });
     freezeLessonRoster(db, lessonId);
     if (req.classPermission !== "counselor" && isMonitorLocked(String(lesson.classStudyDueDate), today)) return void res.status(403).json({ error: "该课已超过14天修改期" });

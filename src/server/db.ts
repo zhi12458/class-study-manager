@@ -44,6 +44,7 @@ function runMigrations(db: DatabaseSync): void {
   if (!applied.has(11)) migrationEleven(db);
   if (!applied.has(12)) migrationTwelve(db);
   if (!applied.has(13)) migrationThirteen(db);
+  if (!applied.has(14)) migrationFourteen(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -563,6 +564,113 @@ function migrationThirteen(db: DatabaseSync): void {
         on course_catalog_items(series_key, source_id) where source_id is not null;
       insert into schema_migrations (version) values (13);
     `);
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function migrationFourteen(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    const entryCounts = db.prepare(
+      `select
+         sum(case when status = 'present' then 1 else 0 end) as presentCount,
+         sum(case when status = 'share' then 1 else 0 end) as shareCount
+       from attendance_entries`,
+    ).get() as { presentCount: number | null; shareCount: number | null };
+    const auditCount = Number((db.prepare(
+      `select count(*) as count from attendance_audit
+        where previous_status in ('present', 'share') or new_status in ('present', 'share')`,
+    ).get() as { count: number }).count);
+
+    db.exec(`
+      alter table attendance_entries rename to attendance_entries_legacy;
+
+      create table attendance_entries (
+        id integer primary key autoincrement,
+        lesson_id integer not null references lessons(id) on delete cascade,
+        lesson_roster_id integer not null references lesson_roster(id) on delete cascade,
+        metric text not null check(metric in ('outline', 'group_study', 'class_study')),
+        status text not null check(status in (
+          'yes', 'no', 'not_required', 'onsite', 'online', 'official_duty', 'absent', 'observer'
+        )),
+        modified_by integer not null references users(id),
+        modified_at text not null default current_timestamp,
+        unique(lesson_roster_id, metric)
+      );
+
+      insert into attendance_entries
+        (id, lesson_id, lesson_roster_id, metric, status, modified_by, modified_at)
+      select id, lesson_id, lesson_roster_id, metric,
+             case status
+               when 'present' then 'onsite'
+               when 'share' then 'observer'
+               when 'makeup' then 'absent'
+               else status
+             end,
+             modified_by, modified_at
+        from attendance_entries_legacy;
+
+      drop table attendance_entries_legacy;
+      create index attendance_lesson_idx on attendance_entries(lesson_id);
+
+      update attendance_audit
+         set previous_status = case previous_status
+               when 'present' then 'onsite'
+               when 'share' then 'observer'
+               when 'makeup' then 'absent'
+               else previous_status
+             end,
+             new_status = case new_status
+               when 'present' then 'onsite'
+               when 'share' then 'observer'
+               when 'makeup' then 'absent'
+               else new_status
+             end
+       where previous_status in ('present', 'share', 'makeup')
+          or new_status in ('present', 'share', 'makeup');
+
+      create trigger attendance_entries_reject_makeup_insert
+      before insert on attendance_entries
+      when new.status = 'makeup'
+      begin
+        select raise(abort, 'makeup attendance status has been retired');
+      end;
+      create trigger attendance_entries_reject_makeup_update
+      before update of status on attendance_entries
+      when new.status = 'makeup'
+      begin
+        select raise(abort, 'makeup attendance status has been retired');
+      end;
+      create trigger attendance_entries_reject_legacy_study_insert
+      before insert on attendance_entries
+      when new.status in ('present', 'share')
+      begin
+        select raise(abort, 'legacy study attendance status has been retired');
+      end;
+      create trigger attendance_entries_reject_legacy_study_update
+      before update of status on attendance_entries
+      when new.status in ('present', 'share')
+      begin
+        select raise(abort, 'legacy study attendance status has been retired');
+      end;
+    `);
+
+    const convertedEntries = Number(entryCounts.presentCount ?? 0) + Number(entryCounts.shareCount ?? 0);
+    if (convertedEntries > 0 || auditCount > 0) {
+      db.prepare(
+        `insert into system_audit_events
+           (event_type, outcome, details_json)
+         values ('attendance_study_statuses_migrated', 'success', ?)`,
+      ).run(JSON.stringify({
+        presentToOnsite: Number(entryCounts.presentCount ?? 0),
+        shareToObserver: Number(entryCounts.shareCount ?? 0),
+        convertedAuditRows: auditCount,
+      }));
+    }
+    db.prepare("insert into schema_migrations (version) values (14)").run();
     db.exec("commit");
   } catch (error) {
     db.exec("rollback");

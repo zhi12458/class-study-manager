@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import type { DatabaseSync } from "node:sqlite";
 
 import { createApp } from "../../src/server/app.js";
+import { ATTENDANCE_SCHEMA_VERSION } from "../../src/shared/types.js";
 
 export interface JsonResponse<T = Record<string, unknown>> {
   status: number;
@@ -93,7 +94,11 @@ export class TestApiClient {
   }
 
   put<T = Record<string, unknown>>(path: string, body?: unknown): Promise<JsonResponse<T>> {
-    return this.json<T>("PUT", path, body);
+    const attendanceBody = /^\/classes\/\d+\/attendance\/\d+$/.test(path)
+      && body !== null && typeof body === "object" && !Array.isArray(body)
+      ? { attendanceSchemaVersion: ATTENDANCE_SCHEMA_VERSION, ...body }
+      : body;
+    return this.json<T>("PUT", path, attendanceBody);
   }
 
   patch<T = Record<string, unknown>>(path: string, body?: unknown): Promise<JsonResponse<T>> {

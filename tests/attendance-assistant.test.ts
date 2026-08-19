@@ -197,7 +197,7 @@ describe("考勤员班级权限", () => {
         records: [{
           studentId: fixture.ordinaryStudentId,
           outline: "yes",
-          groupStudy: "present",
+          groupStudy: "onsite",
           classStudy: "online",
         }],
       });
@@ -208,7 +208,7 @@ describe("考勤员班级权限", () => {
       expect(report.status).toBe(200);
       expect(report.body.details).toEqual(expect.arrayContaining([
         expect.objectContaining({ studentId: fixture.ordinaryStudentId, status: "yes" }),
-        expect.objectContaining({ studentId: fixture.ordinaryStudentId, status: "present" }),
+        expect.objectContaining({ studentId: fixture.ordinaryStudentId, status: "onsite" }),
         expect.objectContaining({ studentId: fixture.ordinaryStudentId, status: "online" }),
       ]));
 
@@ -283,7 +283,7 @@ describe("考勤员班级权限", () => {
       expect(lockedView.body).toMatchObject({ canEdit: false, lockedForMonitor: true });
       const lockedSave = await assistant.put<{ error: string }>(
         `/classes/${fixture.classId}/attendance/${fixture.lessonId}`,
-        { records: [{ studentId: fixture.ordinaryStudentId, groupStudy: "present" }] },
+        { records: [{ studentId: fixture.ordinaryStudentId, groupStudy: "onsite" }] },
       );
       expect(lockedSave.status).toBe(403);
       expect(lockedSave.body.error).toContain("超过14天");

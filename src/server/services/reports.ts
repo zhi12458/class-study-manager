@@ -11,17 +11,17 @@ const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 const ALLOWED_STATUSES: Record<Metric, readonly AttendanceStatus[]> = {
   outline: ["yes", "no", "not_required"],
-  group_study: ["present", "absent"],
-  class_study: ["onsite", "online", "share", "absent"],
+  group_study: ["onsite", "online", "official_duty", "absent", "observer"],
+  class_study: ["onsite", "online", "official_duty", "absent", "observer"],
 };
 
 const COMPLETED_STATUSES: Record<Metric, ReadonlySet<AttendanceStatus>> = {
   outline: new Set(["yes"]),
-  group_study: new Set(["present"]),
+  group_study: new Set(["onsite", "online"]),
   class_study: new Set(["onsite", "online"]),
 };
 
-const INVALID_CLASS_STUDY_STATUSES = new Set<ClassStudyStatus>(["share", "absent"]);
+const INVALID_CLASS_STUDY_STATUSES = new Set<ClassStudyStatus>(["observer", "absent"]);
 
 export interface GroupReportSummary {
   groupId: number;
@@ -264,8 +264,8 @@ export function detectClassStudyRisk(
   const consecutiveTrigger = consecutiveInvalidCount >= 3;
   const rollingThreeMonthTrigger = invalidInThreeMonths >= 5;
   const reasons: string[] = [];
-  if (consecutiveTrigger) reasons.push("最近连续 3 次班修为分享或缺勤");
-  if (rollingThreeMonthTrigger) reasons.push("最近 3 个月有 5 次或以上班修为分享或缺勤");
+  if (consecutiveTrigger) reasons.push("最近连续 3 次班修为旁听或旷课");
+  if (rollingThreeMonthTrigger) reasons.push("最近 3 个月有 5 次或以上班修为旁听或旷课");
 
   return {
     needsAttention: consecutiveTrigger || rollingThreeMonthTrigger,

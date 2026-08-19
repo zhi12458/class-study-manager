@@ -32,23 +32,23 @@ describe("calculateMetricRate", () => {
       notRequired: 1,
       rate: 50,
     });
-    expect(calculateMetricRate("group_study", ["present", "absent", undefined])).toEqual({
+    expect(calculateMetricRate("group_study", ["onsite", "online", "official_duty", "absent", "observer", undefined])).toEqual({
       metric: "group_study",
-      completed: 1,
-      recorded: 2,
+      completed: 2,
+      recorded: 5,
       pending: 1,
       notRequired: 0,
-      rate: 50,
+      rate: 40,
     });
     expect(
-      calculateMetricRate("class_study", ["onsite", "online", "share", "absent"]),
+      calculateMetricRate("class_study", ["onsite", "online", "official_duty", "observer", "absent"]),
     ).toEqual({
       metric: "class_study",
       completed: 2,
-      recorded: 4,
+      recorded: 5,
       pending: 0,
       notRequired: 0,
-      rate: 50,
+      rate: 40,
     });
   });
 
@@ -63,7 +63,7 @@ describe("calculateMetricRate", () => {
   });
 
   it("rejects a status from a different metric", () => {
-    expect(() => calculateMetricRate("outline", ["present"])).toThrow("不适用于指标 outline");
+    expect(() => calculateMetricRate("outline", ["onsite"])).toThrow("不适用于指标 outline");
   });
 });
 
@@ -142,10 +142,10 @@ describe("detectClassStudyRisk", () => {
     const result = detectClassStudyRisk(
       [
         { dueDate: "2026-04-01", status: "onsite", lessonSequence: 1 },
-        { dueDate: "2026-04-08", status: "share", lessonSequence: 2 },
+        { dueDate: "2026-04-08", status: "observer", lessonSequence: 2 },
         { dueDate: "2026-04-15", status: "absent", lessonSequence: 3 },
         { dueDate: "2026-04-22", status: null, lessonSequence: 4 },
-        { dueDate: "2026-04-29", status: "share", lessonSequence: 5 },
+        { dueDate: "2026-04-29", status: "observer", lessonSequence: 5 },
         { dueDate: "2026-05-06", status: "absent", lessonSequence: 6 },
       ],
       "2026-04-30",
@@ -158,18 +158,18 @@ describe("detectClassStudyRisk", () => {
       consecutiveInvalidCount: 3,
       invalidInThreeMonths: 3,
     });
-    expect(result.reasons).toEqual(["最近连续 3 次班修为分享或缺勤"]);
+    expect(result.reasons).toEqual(["最近连续 3 次班修为旁听或旷课"]);
   });
 
   it("detects five invalid results in the rolling three calendar months", () => {
     const result = detectClassStudyRisk(
       [
         { dueDate: "2026-05-25", status: "onsite" },
-        { dueDate: "2026-05-18", status: "share" },
+        { dueDate: "2026-05-18", status: "observer" },
         { dueDate: "2026-04-20", status: "absent" },
-        { dueDate: "2026-03-15", status: "share" },
+        { dueDate: "2026-03-15", status: "observer" },
         { dueDate: "2026-03-01", status: "absent" },
-        { dueDate: "2026-02-28", status: "share" },
+        { dueDate: "2026-02-28", status: "observer" },
         { dueDate: "2026-02-27", status: "absent" },
       ],
       "2026-05-31",
@@ -182,16 +182,16 @@ describe("detectClassStudyRisk", () => {
       consecutiveInvalidCount: 0,
       invalidInThreeMonths: 5,
     });
-    expect(result.reasons).toEqual(["最近 3 个月有 5 次或以上班修为分享或缺勤"]);
+    expect(result.reasons).toEqual(["最近 3 个月有 5 次或以上班修为旁听或旷课"]);
   });
 
-  it("clears the consecutive rule after a valid recorded class study", () => {
+  it("does not treat official duty as attention and lets it break a consecutive warning", () => {
     const result = detectClassStudyRisk(
       [
-        { dueDate: "2026-04-01", status: "share" },
-        { dueDate: "2026-04-08", status: "onsite" },
+        { dueDate: "2026-04-01", status: "observer" },
+        { dueDate: "2026-04-08", status: "official_duty" },
         { dueDate: "2026-04-15", status: "absent" },
-        { dueDate: "2026-04-22", status: "share" },
+        { dueDate: "2026-04-22", status: "observer" },
       ],
       "2026-04-30",
     );

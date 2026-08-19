@@ -77,10 +77,15 @@ test("主要管理页面和考勤保存流程可操作", async ({ page }, testIn
   await navigate(page, "考勤登记");
   await expect(page.getByRole("option", { name: "补课" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "补课" })).toHaveCount(0);
+  for (const metric of ["组修", "班修"]) {
+    await expect(page.getByRole("combobox", { name: metric, exact: true }).locator("option")).toHaveText([
+      "保持不变", "现场", "网络", "公差", "旷课", "旁听",
+    ]);
+  }
   const mobile = testInfo.project.name === "mobile";
   await page.getByRole("combobox", { name: "导图/提纲", exact: true }).selectOption(mobile ? "no" : "yes");
-  await page.getByRole("combobox", { name: "组修", exact: true }).selectOption(mobile ? "absent" : "present");
-  await page.getByRole("combobox", { name: "班修", exact: true }).selectOption(mobile ? "share" : "onsite");
+  await page.getByRole("combobox", { name: "组修", exact: true }).selectOption(mobile ? "absent" : "onsite");
+  await page.getByRole("combobox", { name: "班修", exact: true }).selectOption(mobile ? "observer" : "onsite");
   await page.getByRole("button", { name: /应用到 \d+ 人/ }).click();
   const saveAttendance = page.getByRole("button", { name: "保存本课考勤" });
   await expect(saveAttendance).toBeEnabled();

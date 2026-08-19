@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { openDatabase } from "../src/server/db.js";
 import { createApiRouter } from "../src/server/routes.js";
 import { shanghaiToday } from "../src/server/services/roster.js";
+import { ATTENDANCE_SCHEMA_VERSION } from "../src/shared/types.js";
 
 function addDays(date: string, days: number): string {
   return new Date(new Date(`${date}T00:00:00.000Z`).getTime() + days * 86_400_000).toISOString().slice(0, 10);
@@ -276,18 +277,19 @@ describe.sequential("API lifecycle and class isolation", () => {
     }
 
     const saved = await monitor.put(`/classes/${classId}/attendance/${firstLessonId}`, {
+      attendanceSchemaVersion: ATTENDANCE_SCHEMA_VERSION,
       records: [
         {
           studentId: monitorStudentId,
           outline: "yes",
-          groupStudy: "present",
+          groupStudy: "onsite",
           classStudy: "onsite",
         },
         {
           studentId: secondStudentId,
           outline: "no",
           groupStudy: "absent",
-          classStudy: "share",
+          classStudy: "observer",
         },
       ],
     });

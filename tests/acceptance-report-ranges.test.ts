@@ -83,10 +83,10 @@ describe("报表时间范围验收", () => {
       addLesson(db, classId, 4, "2026-07-01"),
     ];
     const statuses: Array<Partial<Record<Metric, AttendanceStatus>>> = [
-      { outline: "yes", group_study: "present", class_study: "onsite" },
-      { outline: "no", group_study: "present", class_study: "share" },
+      { outline: "yes", group_study: "onsite", class_study: "onsite" },
+      { outline: "no", group_study: "onsite", class_study: "observer" },
       { outline: "yes", group_study: "absent", class_study: "absent" },
-      { outline: "yes", group_study: "present", class_study: "onsite" },
+      { outline: "yes", group_study: "onsite", class_study: "onsite" },
     ];
     lessons.forEach((lesson, index) => {
       const rosterId = Number(db.prepare(

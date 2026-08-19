@@ -70,7 +70,7 @@ async function addStudent(
 }
 
 describe("API 边界、事务与文件响应验收", () => {
-  it("班修不再接受补课状态，并可正常登记为缺勤", async () => {
+  it("组修和班修只接受统一五项状态，并把旷课保存为 absent", async () => {
     await withApi(async ({ admin, adminId }) => {
       const classId = await createClass(admin, adminId, "停用补课状态班", 1);
       const groupId = (await groups(admin, classId))[0].id;
@@ -89,13 +89,43 @@ describe("API 边界、事务与文件响应验收", () => {
       expect(retired.status).toBe(400);
       expect(retired.body.error).toContain("考勤状态无效");
 
+      const legacy = await admin.put<{ error: string }>(`/classes/${classId}/attendance/${lesson.id}`, {
+        records: [{ studentId, groupStudy: "present", classStudy: "share" }],
+      });
+      expect(legacy.status).toBe(400);
+      expect(legacy.body.error).toContain("考勤状态无效");
+
       expect((await admin.put(`/classes/${classId}/attendance/${lesson.id}`, {
-        records: [{ studentId, classStudy: "absent" }],
+        records: [{ studentId, groupStudy: "official_duty", classStudy: "absent" }],
       })).status).toBe(200);
-      const attendance = await admin.get<{ rows: Array<{ studentId: number; classStudy: string }> }>(
+      const attendance = await admin.get<{ attendanceSchemaVersion: number; rows: Array<{ studentId: number; groupStudy: string; classStudy: string }>; statuses: { groupStudy: string[]; classStudy: string[] } }>(
         `/classes/${classId}/attendance/${lesson.id}`,
       );
-      expect(attendance.body.rows.find((row) => row.studentId === studentId)?.classStudy).toBe("absent");
+      expect(attendance.body.attendanceSchemaVersion).toBe(2);
+      expect(attendance.body.rows.find((row) => row.studentId === studentId)).toMatchObject({
+        groupStudy: "official_duty",
+        classStudy: "absent",
+      });
+      expect(attendance.body.statuses.groupStudy).toEqual(["onsite", "online", "official_duty", "absent", "observer"]);
+      expect(attendance.body.statuses.classStudy).toEqual(attendance.body.statuses.groupStudy);
+
+      const staleSave = await admin.json<{ error: string; code: string }>(
+        "PUT",
+        `/classes/${classId}/attendance/${lesson.id}`,
+        { records: [{ studentId, groupStudy: null, classStudy: null }] },
+      );
+      expect(staleSave.status).toBe(409);
+      expect(staleSave.body).toMatchObject({
+        code: "ATTENDANCE_SCHEMA_VERSION_MISMATCH",
+        error: "考勤页面已经更新，请刷新页面后重新操作",
+      });
+      const afterStaleSave = await admin.get<{ rows: Array<{ studentId: number; groupStudy: string; classStudy: string }> }>(
+        `/classes/${classId}/attendance/${lesson.id}`,
+      );
+      expect(afterStaleSave.body.rows.find((row) => row.studentId === studentId)).toMatchObject({
+        groupStudy: "official_duty",
+        classStudy: "absent",
+      });
     });
   });
 
@@ -150,7 +180,7 @@ describe("API 边界、事务与文件响应验收", () => {
         db.prepare("update lessons set class_study_due_date = ? where id = ?")
           .run(addDays(shanghaiToday(), -13), lesson.id);
         const boundarySave = await monitor.put(`/classes/${classId}/attendance/${lesson.id}`, {
-          records: [{ studentId, groupStudy: "present" }],
+          records: [{ studentId, groupStudy: "onsite" }],
         });
         expect(boundarySave.status).toBe(200);
       } finally {
@@ -284,7 +314,7 @@ describe("API 边界、事务与文件响应验收", () => {
         lessons: Array<{ id: number }>;
       }>(`/classes/${classId}/lessons`)).body.lessons[0].id;
       expect((await admin.put(`/classes/${classId}/attendance/${lessonId}`, {
-        records: [{ studentId, outline: "yes", groupStudy: "present", classStudy: "online" }],
+        records: [{ studentId, outline: "yes", groupStudy: "onsite", classStudy: "online" }],
       })).status).toBe(200);
 
       const csv = await admin.raw(`/classes/${classId}/export.csv?range=recent`);
@@ -342,10 +372,10 @@ describe("API 边界、事务与文件响应验收", () => {
         lessons: Array<{ id: number; lessonNumber: number }>;
       }>(`/classes/${classId}/lessons`)).body.lessons;
       expect((await admin.put(`/classes/${classId}/attendance/${lessons[0].id}`, {
-        records: [{ studentId, outline: "yes", groupStudy: "present", classStudy: "online" }],
+        records: [{ studentId, outline: "yes", groupStudy: "onsite", classStudy: "online" }],
       })).status).toBe(200);
       expect((await admin.put(`/classes/${classId}/attendance/${lessons[1].id}`, {
-        records: [{ studentId, outline: "no", groupStudy: "absent", classStudy: "share" }],
+        records: [{ studentId, outline: "no", groupStudy: "absent", classStudy: "observer" }],
       })).status).toBe(200);
 
       const query = `range=custom&from=${firstDue}&to=${firstDue}`;

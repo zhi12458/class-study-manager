@@ -3,8 +3,9 @@ export type CadenceMode = "same_week" | "parallel_two_week";
 export type LessonType = "regular" | "review";
 export type Metric = "outline" | "group_study" | "class_study";
 export type OutlineStatus = "yes" | "no" | "not_required";
-export type GroupStudyStatus = "present" | "absent";
-export type ClassStudyStatus = "onsite" | "online" | "share" | "absent";
+export type StudyStatus = "onsite" | "online" | "official_duty" | "absent" | "observer";
+export type GroupStudyStatus = StudyStatus;
+export type ClassStudyStatus = StudyStatus;
 export type ReportRange = "recent" | "month" | "three_months" | "history" | "custom";
 export type EnrollmentStatus = "normal" | "leave" | "withdrawn";
 export type EnrollmentRole = "monitor" | "attendance_assistant" | "group_leader" | "charity" | "dharma_light" | "communications" | "student";
@@ -154,6 +155,7 @@ export interface AttendanceRow {
 }
 
 export interface AttendancePayload {
+  attendanceSchemaVersion: number;
   lesson: Lesson;
   rows: AttendanceRow[];
   canEdit: boolean;
