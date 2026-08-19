@@ -619,6 +619,14 @@ export function createApiRouter(db: DatabaseSync) {
               (select count(*) from classes c where c.counselor_user_id = u.id and c.archived = 1) as archivedClassCount,
               (select count(*) from class_monitors m join classes c on c.id = m.class_id where m.user_id = u.id and c.archived = 0) as monitorClassCount,
               (select count(*) from class_attendance_assistants a join classes c on c.id = a.class_id where a.user_id = u.id and c.archived = 0) as attendanceAssistantClassCount,
+              (select c.name from enrollments e
+                join classes c on c.id = e.class_id and c.archived = 0
+                join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+               where e.person_id = u.person_id and es.status in ('normal', 'leave') limit 1) as studentClassName,
+              (select es.status from enrollments e
+                join classes c on c.id = e.class_id and c.archived = 0
+                join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+               where e.person_id = u.person_id and es.status in ('normal', 'leave') limit 1) as studentStatus,
               case when
                 not exists (select 1 from classes c where c.counselor_user_id = u.id or c.created_by = u.id)
                 and not exists (select 1 from schedule_breaks b where b.created_by = u.id)
@@ -640,20 +648,85 @@ export function createApiRouter(db: DatabaseSync) {
     res.json({ counselors });
   });
 
+  router.get("/admin/counselor-candidates", requireAdmin, (req, res) => {
+    const query = String(req.query.query ?? "").trim().toLowerCase().slice(0, 80);
+    const pattern = `%${query.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`;
+    const candidates = db.prepare(
+      `select p.id as personId, e.id as enrollmentId,
+              coalesce(nullif(trim(p.name), ''), p.dharma_name) as displayName,
+              p.name, p.dharma_name as dharmaName, p.phone,
+              c.id as classId, c.name as className, es.status,
+              u.username,
+              (select group_concat(er.role) from enrollment_roles er where er.enrollment_id = e.id) as roleCsv,
+              case when m.enrollment_id is not null then 1 else 0 end as isMonitor,
+              case when aa.enrollment_id is not null then 1 else 0 end as isAttendanceAssistant
+         from enrollments e
+         join persons p on p.id = e.person_id
+         join classes c on c.id = e.class_id and c.archived = 0
+         join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+         left join users u on u.person_id = p.id
+         left join class_monitors m on m.class_id = e.class_id and m.enrollment_id = e.id
+         left join class_attendance_assistants aa on aa.class_id = e.class_id and aa.enrollment_id = e.id
+        where es.status in ('normal', 'leave')
+          and coalesce(u.counselor_role, 0) = 0
+          and (? = '' or lower(coalesce(p.name, '')) like ? escape '\\'
+            or lower(coalesce(p.dharma_name, '')) like ? escape '\\'
+            or lower(coalesce(p.phone, '')) like ? escape '\\'
+            or lower(c.name) like ? escape '\\')
+        order by case es.status when 'normal' then 0 else 1 end,
+                 case when trim(c.name) glob '[0-9]*' and trim(c.name) not glob '*[^0-9]*' then 0 else 1 end,
+                 case when trim(c.name) glob '[0-9]*' and trim(c.name) not glob '*[^0-9]*' then cast(trim(c.name) as integer) end,
+                 c.name, displayName
+        limit 200`
+    ).all(query, pattern, pattern, pattern, pattern).map((row) => {
+      const item = row as Record<string, unknown>;
+      const roles = item.roleCsv ? String(item.roleCsv).split(",") : [];
+      return {
+        ...item,
+        identities: [
+          ...(item.isMonitor ? ["monitor"] : []),
+          ...(item.isAttendanceAssistant ? ["attendance_assistant"] : []),
+          ...roles,
+          "student"
+        ]
+      };
+    });
+    res.json({ candidates });
+  });
+
   router.post("/admin/counselors", requireAdmin, (req: AuthedRequest, res) => {
-    const identity = assertPersonName(req.body.name ?? req.body.displayName, req.body.dharmaName);
-    const rawPhone = String(req.body.phone ?? "").trim();
+    const selectedPersonId = req.body.personId == null ? null : numberParam(req.body.personId, "学员");
+    const selected = selectedPersonId == null ? undefined : db.prepare(
+      `select p.id as personId, p.name, p.dharma_name as dharmaName, p.phone
+         from persons p
+        where p.id = ?
+          and exists (
+            select 1 from enrollments e
+            join classes c on c.id = e.class_id and c.archived = 0
+            join enrollment_status_history es on es.enrollment_id = e.id and es.effective_to_sequence is null
+            where e.person_id = p.id and es.status in ('normal', 'leave')
+          )`
+    ).get(selectedPersonId) as { personId: number; name: string; dharmaName: string | null; phone: string | null } | undefined;
+    if (selectedPersonId != null && !selected) {
+      return void res.status(400).json({ error: "只能从未归档班级的正常或休学学员中选择辅导员" });
+    }
+    const identity = selected
+      ? assertPersonName(selected.name, selected.dharmaName)
+      : assertPersonName(req.body.name ?? req.body.displayName, req.body.dharmaName);
+    const rawPhone = String(selected ? selected.phone ?? "" : req.body.phone ?? "").trim();
     const phone = rawPhone ? normalizePhone(rawPhone) : null;
     db.exec("begin immediate");
     try {
-      const person = createOrUpdatePerson(db, { name: identity.name, dharmaName: identity.dharmaName, phone });
+      const person = selected
+        ? { personId: selected.personId, phone, existing: true }
+        : createOrUpdatePerson(db, { name: identity.name, dharmaName: identity.dharmaName, phone });
       const existingUser = db.prepare("select id, username, can_counsel as canCounsel from users where person_id = ?").get(person.personId) as
         | { id: number; username: string; canCounsel: number }
         | undefined;
       let userId: number; let temporaryPassword: string | undefined; let username: string;
       if (existingUser) {
         userId = existingUser.id;
-        username = req.body.username === undefined
+        username = selected || req.body.username === undefined
           ? existingUser.username
           : accountUsername(db, { requested: req.body.username, displayName: identity.displayName, userId });
         db.prepare("update users set counselor_role = 1, can_counsel = 1, active = 1, display_name = ?, username = ?, updated_at = current_timestamp where id = ?")
@@ -854,6 +927,8 @@ export function createApiRouter(db: DatabaseSync) {
       if (meetingTime !== undefined) db.prepare("update classes set meeting_time = ?, updated_at = current_timestamp where id = ?").run(meetingTime, classId);
       if (sourceProgress !== undefined) db.prepare("update classes set source_progress = ?, updated_at = current_timestamp where id = ?").run(sourceProgress, classId);
       if (counselorId !== undefined && counselorId !== classState.counselorId) {
+        db.prepare("delete from class_monitors where class_id = ? and user_id = ?").run(classId, counselorId);
+        db.prepare("delete from class_attendance_assistants where class_id = ? and user_id = ?").run(classId, counselorId);
         db.prepare("update class_counselor_history set ended_at = current_timestamp where class_id = ? and ended_at is null").run(classId);
         db.prepare("insert into class_counselor_history (class_id, counselor_user_id, assigned_by) values (?, ?, ?)")
           .run(classId, counselorId, req.user!.id);
@@ -1304,7 +1379,8 @@ export function createApiRouter(db: DatabaseSync) {
       if (current) deactivateRolelessUser(db, current.userId);
       return void res.json({ ok: true });
     }
-    const classRow = db.prepare("select archived from classes where id = ?").get(classId) as { archived: number };
+    const classRow = db.prepare("select archived, counselor_user_id as counselorUserId from classes where id = ?").get(classId) as
+      { archived: number; counselorUserId: number };
     if (classRow.archived) return void res.status(400).json({ error: "已归档班级不能设置班长" });
     const enrollmentId = numberParam(req.body.studentId ?? req.body.enrollmentId, "学员");
     const student = db.prepare(
@@ -1315,6 +1391,10 @@ export function createApiRouter(db: DatabaseSync) {
         where e.id = ? and e.class_id = ? and es.status = 'normal'`
     ).get(enrollmentId, classId) as { id: number; personId: number; name: string; dharmaName: string | null; phone: string | null } | undefined;
     if (!student) return void res.status(400).json({ error: "班长必须从本班在册学员中选择" });
+    const existingUser = db.prepare("select id from users where person_id = ?").get(student.personId) as { id: number } | undefined;
+    if (existingUser?.id === classRow.counselorUserId) {
+      return void res.status(409).json({ error: "本班辅导员已经拥有全部管理权限，无需重复设置为班长" });
+    }
     db.exec("begin immediate");
     try {
       const previous = db.prepare("select user_id as userId from class_monitors where class_id = ?").get(classId) as { userId: number } | undefined;

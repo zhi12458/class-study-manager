@@ -387,6 +387,14 @@ td strong { color: #253b55; }
 .history-mode { display: flex; gap: 6px; }
 .history-mode button { min-height: 34px; color: #65798d; background: #eef4f8; border: 1px solid transparent; }
 .history-mode button.active { color: #0d73c6; background: #e8f4fd; border-color: #b9dcf5; }
+.candidate-list { display: grid; gap: 8px; max-height: min(46vh, 430px); padding: 2px; overflow-y: auto; }
+.candidate-option { display: grid; grid-template-columns: auto auto 1fr; align-items: center; gap: 10px; padding: 12px; border: 1px solid #dce8f1; border-radius: 12px; background: #fff; cursor: pointer; }
+.candidate-option:hover { border-color: #9bcdf0; background: #f8fcff; }
+.candidate-option.selected { border-color: #2695e8; background: #edf8ff; box-shadow: 0 0 0 2px rgba(38,149,232,.1); }
+.candidate-option input { width: 17px; height: 17px; margin: 0; }
+.candidate-copy { display: grid; gap: 3px; min-width: 0; }
+.candidate-copy strong, .candidate-copy small { overflow-wrap: anywhere; }
+.candidate-copy small { color: #687f93; }
 .custom-date-controls { display: flex; align-items: end; gap: 9px; }
 .custom-date-controls label { display: grid; gap: 5px; color: #65798d; font-size: 11px; font-weight: 750; }
 .custom-date-controls input { min-width: 165px; }

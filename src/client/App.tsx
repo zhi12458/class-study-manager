@@ -54,6 +54,7 @@ import {
   type ClassStudyStatus,
   type ClassSummary,
   type Counselor,
+  type CounselorCandidate,
   type CurrentUser,
   type EnrollmentRole,
   type EnrollmentStatus,
@@ -648,6 +649,11 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
   const [showCounselor, setShowCounselor] = useState(false);
   const [showCounselorManager, setShowCounselorManager] = useState(false);
   const [editingCounselor, setEditingCounselor] = useState<Counselor | null>(null);
+  const [counselorCreateMode, setCounselorCreateMode] = useState<"existing" | "new">("existing");
+  const [counselorCandidates, setCounselorCandidates] = useState<CounselorCandidate[]>([]);
+  const [counselorSearch, setCounselorSearch] = useState("");
+  const [selectedCandidateId, setSelectedCandidateId] = useState("");
+  const [candidateLoading, setCandidateLoading] = useState(false);
   const [name, setName] = useState("");
   const [meetingTime, setMeetingTime] = useState("");
   const [groupCount, setGroupCount] = useState(3);
@@ -672,6 +678,8 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
         activeClassCount: Number(raw.activeClassCount ?? 0), archivedClassCount: Number(raw.archivedClassCount ?? 0),
         monitorClassCount: Number(raw.monitorClassCount ?? 0),
         attendanceAssistantClassCount: Number(raw.attendanceAssistantClassCount ?? 0),
+        studentClassName: raw.studentClassName == null ? null : String(raw.studentClassName),
+        studentStatus: raw.studentStatus == null ? null : String(raw.studentStatus) as "normal" | "leave",
         deletable: Boolean(raw.deletable)
       })));
     } catch (error) {
@@ -680,6 +688,36 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
   }, [user.isAdmin]);
 
   useEffect(() => { void loadCounselors(); }, [loadCounselors]);
+  useEffect(() => {
+    if (!showCounselor || counselorCreateMode !== "existing") return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setCandidateLoading(true);
+      try {
+        const data = await apiJson<unknown>(`/api/admin/counselor-candidates?query=${encodeURIComponent(counselorSearch.trim())}`, {
+          signal: controller.signal
+        });
+        const next: CounselorCandidate[] = asList<Record<string, unknown>>(data, "candidates", "items").map((raw) => ({
+          personId: Number(raw.personId), enrollmentId: Number(raw.enrollmentId),
+          displayName: String(raw.displayName ?? raw.name ?? ""),
+          name: raw.name == null ? null : String(raw.name),
+          dharmaName: raw.dharmaName == null ? null : String(raw.dharmaName),
+          phone: raw.phone == null ? null : String(raw.phone),
+          classId: Number(raw.classId), className: String(raw.className ?? ""),
+          status: String(raw.status) as "normal" | "leave",
+          username: raw.username == null ? null : String(raw.username),
+          identities: Array.isArray(raw.identities) ? raw.identities.map(String) as EnrollmentRole[] : ["student" as EnrollmentRole]
+        }));
+        setCounselorCandidates(next);
+        setSelectedCandidateId((current) => next.some((item) => String(item.personId) === current) ? current : "");
+      } catch (error) {
+        if (!controller.signal.aborted) setNotice({ tone: "error", text: errorText(error) });
+      } finally {
+        if (!controller.signal.aborted) setCandidateLoading(false);
+      }
+    }, 200);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [showCounselor, counselorCreateMode, counselorSearch]);
   useEffect(() => {
     if (showCreate && user.isAdmin && !counselorId && counselors.length) setCounselorId(String(counselors[0].id));
   }, [showCreate, counselors, counselorId, user.isAdmin]);
@@ -709,16 +747,25 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
   async function createCounselor(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
+    if (counselorCreateMode === "existing" && !selectedCandidateId) {
+      return setNotice({ tone: "error", text: "请先选择一名现有学员" });
+    }
     setLoading(true);
     try {
       const result = await apiJson<Record<string, unknown>>("/api/admin/counselors", {
         method: "POST",
-        body: JSON.stringify({ name: form.get("name"), dharmaName: form.get("dharmaName"), phone: form.get("phone"), username: form.get("username") })
+        body: JSON.stringify(counselorCreateMode === "existing"
+          ? { personId: Number(selectedCandidateId), username: form.get("username") }
+          : { name: form.get("name"), dharmaName: form.get("dharmaName"), phone: form.get("phone"), username: form.get("username") })
       });
       const temporaryPassword = String(result.temporaryPassword ?? (result.account as Record<string, unknown> | undefined)?.temporaryPassword ?? "");
       setShowCounselor(false);
       const loginIdentifier = String(result.loginIdentifier ?? result.username ?? "");
-      setNotice({ tone: "success", text: temporaryPassword ? `辅导员账号已创建：${loginIdentifier}，临时密码：${temporaryPassword}` : "辅导员账号已创建" });
+      setNotice({ tone: "success", text: temporaryPassword
+        ? `辅导员账号已创建：${loginIdentifier}，临时密码：${temporaryPassword}`
+        : `辅导员资格已启用，继续使用原登录账号：${loginIdentifier}` });
+      setCounselorSearch("");
+      setSelectedCandidateId("");
       await loadCounselors();
     } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
     finally { setLoading(false); }
@@ -783,7 +830,7 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
   return (
     <main className="page">
       <PageHeader eyebrow="CLASS SPACES" title="全部班级" description="创建、切换并管理您有权限访问的班级。" actions={<>
-        {user.isAdmin && <button className="secondary" onClick={() => setShowCounselor(true)}><UserPlus size={17} /> 新建辅导员</button>}
+        {user.isAdmin && <button className="secondary" onClick={() => { setCounselorCreateMode("existing"); setShowCounselor(true); }}><UserPlus size={17} /> 添加辅导员</button>}
         {user.isAdmin && <button className="secondary" onClick={() => { setCounselorNotice(null); setShowCounselorManager(true); }}><UserCog size={17} /> 管理辅导员</button>}
         {(user.isAdmin || user.canCounsel) && <button className="primary" onClick={() => setShowCreate(true)}><Plus size={17} /> 新建班级</button>}
       </>} />
@@ -825,12 +872,28 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
           <div className="modal-actions"><button type="button" className="ghost" onClick={() => setShowCreate(false)}>取消</button><button className="primary" disabled={loading}>{loading ? "创建中..." : "创建班级"}</button></div>
         </form>
       </Modal>}
-      {showCounselor && <Modal title="新建辅导员账号" subtitle="系统会生成一次性临时密码，首次登录必须修改。" onClose={() => setShowCounselor(false)}>
+      {showCounselor && <Modal title="添加辅导员" subtitle="可以复用现有学员资料和账号，也可以新建人员。" onClose={() => setShowCounselor(false)} wide>
         <form className="form-stack" onSubmit={createCounselor}>
-          <div className="form-grid two"><label>姓名（选填）<input name="name" placeholder="俗名" /></label><label>法名（至少填写一项）<input name="dharmaName" placeholder="例如：明觉" /></label></div>
-          <label>手机号（选填）<input name="phone" inputMode="tel" placeholder="未填区号时默认 +86" /></label>
-          <label>登录账号（选填）<input name="username" autoCapitalize="none" placeholder="留空时优先用手机号，否则按姓名或法名生成拼音" /><small>账号创建后不会随法名变化；如有重名，系统会自动添加数字。</small></label>
-          <div className="modal-actions"><button type="button" className="ghost" onClick={() => setShowCounselor(false)}>取消</button><button className="primary" disabled={loading}>{loading ? "创建中..." : "创建并生成密码"}</button></div>
+          <div className="history-mode" role="group" aria-label="添加辅导员方式">
+            <button type="button" className={counselorCreateMode === "existing" ? "active" : ""} onClick={() => setCounselorCreateMode("existing")}>从现有学员选择</button>
+            <button type="button" className={counselorCreateMode === "new" ? "active" : ""} onClick={() => setCounselorCreateMode("new")}>新建人员</button>
+          </div>
+          {counselorCreateMode === "existing" ? <>
+            <label className="search-field"><span>搜索学员</span><input value={counselorSearch} onChange={(event) => setCounselorSearch(event.target.value)} placeholder="姓名、法名、手机号或所在班级" autoFocus /></label>
+            {candidateLoading ? <Loading text="正在查找学员..." /> : counselorCandidates.length ? <div className="candidate-list" role="radiogroup" aria-label="现有学员">
+              {counselorCandidates.map((candidate) => <label className={`candidate-option ${selectedCandidateId === String(candidate.personId) ? "selected" : ""}`} key={candidate.personId}>
+                <input type="radio" name="personId" value={candidate.personId} checked={selectedCandidateId === String(candidate.personId)} onChange={() => setSelectedCandidateId(String(candidate.personId))} />
+                <span className="mini-avatar">{candidate.displayName.slice(0, 1)}</span>
+                <span className="candidate-copy"><strong>{candidate.displayName}</strong><small>{candidate.className} · {ENROLLMENT_STATUS_LABELS[candidate.status]} · {candidate.identities.map((role) => ENROLLMENT_ROLE_LABELS[role]).filter((label, index, all) => all.indexOf(label) === index).join("、")}</small><small>{candidate.phone || "无手机号"}{candidate.username ? ` · 账号 ${candidate.username}` : " · 尚无登录账号"}</small></span>
+              </label>)}
+            </div> : <EmptyState title="没有符合条件的学员" detail="候选范围为未归档班级中的正常或休学学员，已是辅导员的人不会重复显示。" />}
+            {selectedCandidateId && !counselorCandidates.find((item) => String(item.personId) === selectedCandidateId)?.username && <label>登录账号（选填）<input name="username" autoCapitalize="none" placeholder="留空时优先用手机号，否则按姓名或法名生成拼音" /><small>系统只在该学员尚无账号时创建账号和一次性密码。</small></label>}
+          </> : <>
+            <div className="form-grid two"><label>姓名（选填）<input name="name" placeholder="俗名" autoFocus /></label><label>法名（至少填写一项）<input name="dharmaName" placeholder="例如：明觉" /></label></div>
+            <label>手机号（选填）<input name="phone" inputMode="tel" placeholder="未填区号时默认 +86" /></label>
+            <label>登录账号（选填）<input name="username" autoCapitalize="none" placeholder="留空时优先用手机号，否则按姓名或法名生成拼音" /><small>账号创建后不会随法名变化；如有重名，系统会自动添加数字。</small></label>
+          </>}
+          <div className="modal-actions"><button type="button" className="ghost" onClick={() => setShowCounselor(false)}>取消</button><button className="primary" disabled={loading}>{loading ? "处理中..." : counselorCreateMode === "existing" ? "启用辅导员资格" : "创建并生成密码"}</button></div>
         </form>
       </Modal>}
       {showCounselorManager && <Modal title="辅导员账号管理" subtitle="先转交未归档班级，再停用辅导员；有历史记录的账号不会被物理删除。" onClose={() => setShowCounselorManager(false)} wide>
@@ -839,7 +902,7 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
           {counselors.length === 0 ? <EmptyState title="还没有辅导员账号" detail="请先创建辅导员。" /> : <><div className="table-wrap counselor-table desktop-table"><table><thead><tr><th>辅导员</th><th>负责班级</th><th>其他身份</th><th>状态</th><th aria-label="操作" /></tr></thead><tbody>{counselors.map((counselor) => <tr key={counselor.id}>
             <td><div className="person-cell"><div className="mini-avatar">{counselor.displayName.slice(0, 1)}</div><span><strong>{counselor.displayName}</strong><small>{counselor.phone || "无手机号"} · {counselor.username}</small></span></div></td>
             <td><strong>{counselor.activeClassCount ?? 0}</strong> 个进行中<small className="cell-note">{counselor.archivedClassCount ? `${counselor.archivedClassCount} 个已归档` : "无已归档班级"}</small></td>
-            <td>{counselor.monitorClassCount || counselor.attendanceAssistantClassCount ? <div className="badge-row">{Boolean(counselor.monitorClassCount) && <span className="soft-badge">兼任班长</span>}{Boolean(counselor.attendanceAssistantClassCount) && <span className="soft-badge">兼任考勤员</span>}</div> : "—"}</td>
+            <td>{counselor.monitorClassCount || counselor.attendanceAssistantClassCount || counselor.studentClassName ? <div className="badge-row">{counselor.studentClassName && <span className="soft-badge">{counselor.studentClassName} · {counselor.studentStatus === "leave" ? "休学学员" : "学员"}</span>}{Boolean(counselor.monitorClassCount) && <span className="soft-badge">兼任班长</span>}{Boolean(counselor.attendanceAssistantClassCount) && <span className="soft-badge">兼任考勤员</span>}</div> : "—"}</td>
             <td><span className={`state-dot ${counselor.active === false ? "inactive" : ""}`}>{counselor.active === false ? "已停用" : "正常"}</span></td>
             <td><div className="row-actions">
               <button className="secondary compact" onClick={() => setEditingCounselor(counselor)} disabled={loading}>编辑资料</button>
@@ -848,7 +911,7 @@ function ClassHub({ user, classes, onRefresh, onSelect }: { user: CurrentUser; c
             </div></td>
           </tr>)}</tbody></table></div><div className="mobile-card-list">{counselors.map((counselor) => <article className="student-card" key={counselor.id}>
             <div className="person-cell"><div className="mini-avatar large">{counselor.displayName.slice(0, 1)}</div><span><strong>{counselor.displayName}</strong><small>{counselor.phone || "无手机号"} · {counselor.username}</small></span><span className={`state-dot ${counselor.active === false ? "inactive" : ""}`}>{counselor.active === false ? "已停用" : "正常"}</span></div>
-            <dl><div><dt>负责班级</dt><dd>{counselor.activeClassCount ?? 0} 个进行中{counselor.archivedClassCount ? ` · ${counselor.archivedClassCount} 个已归档` : ""}</dd></div><div><dt>其他身份</dt><dd>{[counselor.monitorClassCount ? "兼任班长" : "", counselor.attendanceAssistantClassCount ? "兼任考勤员" : ""].filter(Boolean).join("、") || "—"}</dd></div></dl>
+            <dl><div><dt>负责班级</dt><dd>{counselor.activeClassCount ?? 0} 个进行中{counselor.archivedClassCount ? ` · ${counselor.archivedClassCount} 个已归档` : ""}</dd></div><div><dt>其他身份</dt><dd>{[counselor.studentClassName ? `${counselor.studentClassName} ${counselor.studentStatus === "leave" ? "休学学员" : "学员"}` : "", counselor.monitorClassCount ? "兼任班长" : "", counselor.attendanceAssistantClassCount ? "兼任考勤员" : ""].filter(Boolean).join("、") || "—"}</dd></div></dl>
             <div className="card-actions"><button className="secondary" onClick={() => setEditingCounselor(counselor)} disabled={loading}>编辑资料</button><button className="secondary" onClick={() => void toggleCounselor(counselor)} disabled={loading || (counselor.active !== false && Boolean(counselor.activeClassCount))} title={counselor.active !== false && counselor.activeClassCount ? "请先转交其负责的班级" : undefined}>{counselor.active === false ? "恢复" : "停用"}</button>{counselor.deletable && <button className="ghost danger" onClick={() => void deleteCounselor(counselor)} disabled={loading}>永久删除</button>}</div>
           </article>)}</div></>}
           <div className="permission-note"><strong>为什么有些账号不能删除？</strong><span>只要账号已经关联班级、学员、班长、考勤员或考勤历史，就只能停用，以保证历史记录仍能显示正确的操作人。</span></div>

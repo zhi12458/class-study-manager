@@ -69,6 +69,16 @@ db.prepare(
      (class_id, enrollment_id, user_id, assigned_by) values (?, ?, ?, ?)`,
 ).run(classId, assistantEnrollmentId, assistantUserId, admin.id);
 
+const counselorCandidatePersonId = Number(db.prepare(
+  "insert into persons (name, dharma_name) values ('辅导候选', '善选')",
+).run().lastInsertRowid);
+const counselorCandidateEnrollmentId = Number(db.prepare(
+  "insert into enrollments (class_id, person_id, active_from_sequence) values (?, ?, 1)",
+).run(classId, counselorCandidatePersonId).lastInsertRowid);
+db.prepare(
+  "insert into group_assignments (enrollment_id, group_id, effective_from_sequence) values (?, ?, 1)",
+).run(counselorCandidateEnrollmentId, groups[1].id);
+
 const today = shanghaiToday();
 const dueDates = [addDays(today, -14), addDays(today, -7), addDays(today, 7)];
 const lessonIds = dueDates.map((dueDate, index) => Number(db.prepare(

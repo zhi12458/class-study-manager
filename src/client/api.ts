@@ -52,7 +52,23 @@ export interface Counselor {
   archivedClassCount?: number;
   monitorClassCount?: number;
   attendanceAssistantClassCount?: number;
+  studentClassName?: string | null;
+  studentStatus?: "normal" | "leave" | null;
   deletable?: boolean;
+}
+
+export interface CounselorCandidate {
+  personId: number;
+  enrollmentId: number;
+  displayName: string;
+  name: string | null;
+  dharmaName: string | null;
+  phone: string | null;
+  classId: number;
+  className: string;
+  status: "normal" | "leave";
+  username: string | null;
+  identities: EnrollmentRole[];
 }
 
 export interface ClassSummary {

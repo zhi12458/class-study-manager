@@ -147,6 +147,26 @@ test("考勤员只能进入考勤和统计，不能打开课表、名册、设�
   await expect(page.getByRole("heading", { name: "课表安排" })).toHaveCount(0);
 });
 
+test("管理员可从现有学员中启用辅导员资格", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "避免跨项目重复修改同一测试人员");
+  await navigate(page, "全部班级");
+  const trigger = page.getByRole("button", { name: "添加辅导员" });
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "添加辅导员" });
+  await expect(dialog.getByRole("button", { name: "从现有学员选择" })).toHaveClass(/active/);
+  await dialog.getByLabel("搜索学员").fill("善选");
+  const candidate = dialog.getByText("辅导候选", { exact: true });
+  await expect(candidate).toBeVisible();
+  await candidate.click();
+  const promoteResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/api/admin/counselors"));
+  await dialog.getByRole("button", { name: "启用辅导员资格" }).click();
+  expect((await promoteResponse).status()).toBe(200);
+  await expect(page.getByText(/辅导员账号已创建：.*临时密码：/)).toBeVisible();
+
+  await page.getByRole("button", { name: "管理辅导员" }).click();
+  await expect(page.getByRole("dialog", { name: "辅导员账号管理" }).getByText("辅导候选", { exact: true }).first()).toBeVisible();
+});
+
 test("手机菜单公开正确状态并可用Escape关闭", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "mobile", "仅验证手机导航");
   const menu = page.getByRole("button", { name: "打开菜单" });

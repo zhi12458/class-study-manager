@@ -33,6 +33,122 @@ async function createClass(admin: TestApiClient, name: string, counselorId: numb
 }
 
 describe("辅导员、班长和学员生命周期", () => {
+  it("从正常或休学学员启用辅导员资格并复用原账号和跨班身份", async () => {
+    await withAdmin(async (db, admin, client) => {
+      const owner = await createCounselor(admin, "原辅导员", "13800001020");
+      const sourceClassId = await createClass(admin, "学员来源班", owner.id);
+      const groups = await admin.get<{ groups: Array<{ id: number }> }>(`/classes/${sourceClassId}/groups`);
+      const student = await admin.post<{ studentId: number }>(`/classes/${sourceClassId}/students`, {
+        name: "复合学员",
+        dharmaName: "善复",
+        phone: "13800001021",
+        groupId: groups.body.groups[0].id,
+      });
+      const assistant = await admin.post<{ userId: number; temporaryPassword: string; loginIdentifier: string }>(
+        `/classes/${sourceClassId}/attendance-assistants`,
+        { studentId: student.body.studentId },
+      );
+      expect(assistant.status).toBe(200);
+
+      const candidates = await admin.get<{
+        candidates: Array<{ personId: number; enrollmentId: number; className: string; status: string; identities: string[] }>;
+      }>("/admin/counselor-candidates?query=%E5%96%84%E5%A4%8D");
+      expect(candidates.status).toBe(200);
+      const candidate = candidates.body.candidates.find((item) => item.enrollmentId === student.body.studentId);
+      expect(candidate).toMatchObject({ className: "学员来源班", status: "normal" });
+      expect(candidate?.identities).toEqual(expect.arrayContaining(["student", "attendance_assistant"]));
+      if (!candidate) throw new Error("测试候选学员不存在");
+
+      const promoted = await admin.post<{ id: number; temporaryPassword?: string; loginIdentifier: string }>(
+        "/admin/counselors",
+        { personId: candidate.personId, username: "不应改号", phone: "13900009999" },
+      );
+      expect(promoted.status).toBe(200);
+      expect(promoted.body.id).toBe(assistant.body.userId);
+      expect(promoted.body.temporaryPassword).toBeUndefined();
+      expect(promoted.body.loginIdentifier).toBe(assistant.body.loginIdentifier);
+      expect(db.prepare("select count(*) as count from persons where phone = ?").get("+8613800001021")).toEqual({ count: 1 });
+      const counselorList = await admin.get<{
+        counselors: Array<{ id: number; studentClassName: string | null; studentStatus: string | null }>;
+      }>("/admin/counselors");
+      expect(counselorList.body.counselors.find((item) => item.id === promoted.body.id)).toMatchObject({
+        studentClassName: "学员来源班",
+        studentStatus: "normal",
+      });
+
+      const targetClassId = await createClass(admin, "辅导目标班", promoted.body.id);
+      const compositeClient = client();
+      expect((await compositeClient.post("/auth/login", {
+        identifier: assistant.body.loginIdentifier,
+        password: assistant.body.temporaryPassword,
+      })).status).toBe(200);
+      const me = await compositeClient.get<{
+        classAccesses: Array<{ classId: number; permission: string }>;
+      }>("/auth/me");
+      expect(me.body.classAccesses).toEqual(expect.arrayContaining([
+        expect.objectContaining({ classId: sourceClassId, permission: "attendance_assistant" }),
+        expect.objectContaining({ classId: targetClassId, permission: "counselor" }),
+      ]));
+
+      expect((await admin.patch(`/classes/${sourceClassId}`, { counselorId: promoted.body.id })).status).toBe(200);
+      expect(db.prepare(
+        "select 1 from class_attendance_assistants where class_id = ? and user_id = ?",
+      ).get(sourceClassId, promoted.body.id)).toBeUndefined();
+      expect(db.prepare(
+        "select 1 from enrollments where id = ? and person_id = ?",
+      ).get(student.body.studentId, candidate.personId)).toBeDefined();
+      const afterTransfer = await compositeClient.get<{
+        classAccesses: Array<{ classId: number; permission: string }>;
+      }>("/auth/me");
+      expect(afterTransfer.body.classAccesses.find((item) => item.classId === sourceClassId)?.permission).toBe("counselor");
+      const redundantMonitor = await admin.put<{ error: string }>(`/classes/${sourceClassId}/monitor`, {
+        studentId: student.body.studentId,
+      });
+      expect(redundantMonitor.status).toBe(409);
+      expect(redundantMonitor.body.error).toContain("辅导员");
+    });
+  });
+
+  it("辅导员候选只包含未归档班级的正常和休学学员，无账号学员才生成临时密码", async () => {
+    await withAdmin(async (_db, admin, client) => {
+      const owner = await createCounselor(admin, "候选班辅导员", "13800001030");
+      const classId = await createClass(admin, "候选范围班", owner.id);
+      const groups = await admin.get<{ groups: Array<{ id: number }> }>(`/classes/${classId}/groups`);
+      const add = async (name: string) => (await admin.post<{ studentId: number }>(`/classes/${classId}/students`, {
+        name, groupId: groups.body.groups[0].id,
+      })).body.studentId;
+      const leaveId = await add("休学候选");
+      const withdrawnId = await add("退学候选");
+      expect((await admin.patch(`/classes/${classId}/students/${leaveId}`, { status: "leave" })).status).toBe(200);
+      expect((await admin.patch(`/classes/${classId}/students/${withdrawnId}`, { status: "withdrawn" })).status).toBe(200);
+
+      const visible = await admin.get<{ candidates: Array<{ enrollmentId: number; personId: number; status: string }> }>(
+        "/admin/counselor-candidates?query=%E5%80%99%E9%80%89",
+      );
+      expect(visible.body.candidates.map((item) => item.enrollmentId)).toContain(leaveId);
+      expect(visible.body.candidates.map((item) => item.enrollmentId)).not.toContain(withdrawnId);
+      const leave = visible.body.candidates.find((item) => item.enrollmentId === leaveId)!;
+      expect(leave.status).toBe("leave");
+
+      const promoted = await admin.post<{ temporaryPassword: string; loginIdentifier: string }>(
+        "/admin/counselors",
+        { personId: leave.personId },
+      );
+      expect(promoted.status).toBe(200);
+      expect(promoted.body.temporaryPassword).toBeTruthy();
+      expect(promoted.body.loginIdentifier).toMatch(/^[a-z0-9._-]+$/);
+      expect((await client().post("/auth/login", {
+        identifier: promoted.body.loginIdentifier,
+        password: promoted.body.temporaryPassword,
+      })).status).toBe(200);
+
+      expect((await admin.patch(`/classes/${classId}`, { archived: true })).status).toBe(200);
+      expect((await admin.get<{ candidates: unknown[] }>("/admin/counselor-candidates")).body.candidates).toHaveLength(0);
+      expect((await admin.post<{ error: string }>("/admin/counselors", { personId: leave.personId })).status).toBe(400);
+      expect((await client().get("/admin/counselor-candidates")).status).toBe(401);
+    });
+  });
+
   it("保留辅导员角色记录，并允许停用、恢复和删除从未使用的账号", async () => {
     await withAdmin(async (db, admin, client) => {
       const columns = db.prepare("pragma table_info(users)").all() as Array<{ name: string }>;
