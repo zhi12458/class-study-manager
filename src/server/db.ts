@@ -43,6 +43,7 @@ function runMigrations(db: DatabaseSync): void {
   if (!applied.has(10)) migrationTen(db);
   if (!applied.has(11)) migrationEleven(db);
   if (!applied.has(12)) migrationTwelve(db);
+  if (!applied.has(13)) migrationThirteen(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -546,6 +547,22 @@ function migrationTwelve(db: DatabaseSync): void {
       ).run(JSON.stringify({ convertedAttendanceEntries: entryCount, convertedAuditRows: auditCount }));
     }
     db.prepare("insert into schema_migrations (version) values (12)").run();
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function migrationThirteen(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    db.exec(`
+      drop index if exists course_catalog_source_unique;
+      create unique index course_catalog_series_source_unique
+        on course_catalog_items(series_key, source_id) where source_id is not null;
+      insert into schema_migrations (version) values (13);
+    `);
     db.exec("commit");
   } catch (error) {
     db.exec("rollback");

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseOfficialCourseTree } from "../src/server/services/courseCatalog.js";
+import { openDatabase } from "../src/server/db.js";
+import { parseOfficialCourseTree, replaceCourseCatalog } from "../src/server/services/courseCatalog.js";
 
 describe("官方课程目录快照", () => {
   it("按官网层级排序，并把旧课程名转换为佛法要领", () => {
@@ -47,8 +48,70 @@ describe("官方课程目录快照", () => {
       "智士晋级开示", "辩中边论", "唯识三十论", "心经的人生智慧",
       "心经的禅观", "金刚经", "普贤行愿品的观修原理", "六祖坛经"
     ]);
-    expect(sageCatalog[0].items).toEqual([expect.objectContaining({ title: "晋级开示：入不二法门" })]);
-    expect(sageCatalog[1].items.map((item) => item.title)).toEqual(["《辩中边论》第1课", "《辩中边论》第2课"]);
+    expect(sageCatalog[0].items.map((item) => item.title)).toEqual([
+      "晋级开示：入不二法门",
+      "《辩中边论》第1课",
+      "《辩中边论》第2课",
+      "《唯识三十论》第1课",
+      "《心经的人生智慧》第1课",
+      "《心经的禅观》第1课",
+      "《金刚经》第1课",
+      "《普贤行愿品》第1课",
+      "《六祖坛经》第1课"
+    ]);
+    expect(sageCatalog[1].items.map((item) => item.title)).toEqual([
+      "《辩中边论》第1课",
+      "《辩中边论》第2课",
+      "《唯识三十论》第1课",
+      "《心经的人生智慧》第1课",
+      "《心经的禅观》第1课",
+      "《金刚经》第1课",
+      "《普贤行愿品》第1课",
+      "《六祖坛经》第1课"
+    ]);
+    expect(sageCatalog[3].items.map((item) => item.title)).toEqual([
+      "《心经的人生智慧》第1课",
+      "《心经的禅观》第1课",
+      "《金刚经》第1课",
+      "《普贤行愿品》第1课",
+      "《六祖坛经》第1课"
+    ]);
+
+    const ownCourseIds = [
+      [1],
+      [2, 3],
+      [4],
+      [5],
+      [6],
+      [7],
+      [8],
+      [9],
+      [11, 10],
+      [12],
+      [13],
+      [14],
+      [15],
+      [16],
+      [17]
+    ];
+    catalog.forEach((entry, index) => {
+      expect(entry.items.map((item) => item.sourceId), `${entry.displayName} 应衔接所有后续课程`).toEqual(
+        ownCourseIds.slice(index).flat()
+      );
+    });
+
+    const db = openDatabase(":memory:");
+    try {
+      expect(() => replaceCourseCatalog(db, catalog)).not.toThrow();
+      expect(db.prepare(
+        "select count(*) as count from course_catalog_items where source_id = 17",
+      ).get()).toEqual({ count: catalog.length });
+      expect(db.prepare(
+        "select count(*) as count from course_catalog_items where series_key = 'diamond_sutra'",
+      ).get()).toEqual({ count: 3 });
+    } finally {
+      db.close();
+    }
 
     const incomplete = structuredClone(payload) as unknown as {
       data: Array<{ id: number; children?: Array<{ id: number }> }>;

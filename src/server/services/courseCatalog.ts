@@ -61,12 +61,13 @@ function displayTitle(title: string): string {
   return title.replaceAll("菩提道次第略论", "佛法要领").replaceAll("道次第", "佛法要领");
 }
 
-function series(key: string, displayName: string, node: SourceNode): CatalogSeries {
+function series(key: string, displayName: string, nodes: SourceNode[]): CatalogSeries {
+  const sourceItems = nodes.flatMap(collect);
   return {
     key,
     displayName,
-    sourceName: displayTitle(String(node.name ?? displayName)),
-    items: collect(node).map((item, index) => {
+    sourceName: displayTitle(String(nodes[0]?.name ?? displayName)),
+    items: sourceItems.map((item, index) => {
       const title = displayTitle(String(item.title ?? `第${index + 1}课`));
       return {
         position: index + 1,
@@ -111,7 +112,12 @@ export function parseOfficialCourseTree(payload: unknown): CatalogSeries[] {
     .filter(([, , node]) => !node || collect(node).length === 0)
     .map(([, name]) => name);
   if (missing.length > 0) throw new Error(`官方课程目录不完整，缺少：${missing.join("、")}`);
-  return definitions.map(([key, name, node]) => series(key, name, node!));
+  // Every option is a starting point in one continuous curriculum. A short
+  // series therefore continues into the following series instead of silently
+  // generating fewer lessons than requested.
+  return definitions.map(([key, name], index) =>
+    series(key, name, definitions.slice(index).map(([, , node]) => node!))
+  );
 }
 
 export function replaceCourseCatalog(db: DatabaseSync, catalog: CatalogSeries[]): void {
