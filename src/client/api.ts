@@ -126,6 +126,8 @@ export interface Lesson {
   groupStudyDueDate: string;
   classStudyDueDate: string;
   started?: boolean;
+  hasRecordedAttendance?: boolean;
+  scheduleLocked?: boolean;
   scheduleEditable?: boolean;
   lockedForMonitor?: boolean;
   status?: "future" | "current" | "finished";

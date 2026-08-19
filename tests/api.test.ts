@@ -310,23 +310,29 @@ describe.sequential("API lifecycle and class isolation", () => {
     );
   });
 
-  it("lets the monitor manage the future schedule without changing started lessons", async () => {
+  it("lets the monitor manage the due-date schedule and explicitly confirm a rebuild that clears attendance", async () => {
     const before = await monitor.get<{
       lessons: Array<{
         id: number; lessonNumber: number; title: string; lessonType: string;
-        classStudyDueDate: string; started: boolean;
+        classStudyDueDate: string; started: boolean; hasRecordedAttendance: boolean;
+        scheduleLocked: boolean; scheduleEditable: boolean;
       }>;
     }>(`/classes/${classId}/lessons`);
     expect(before.status).toBe(200);
     const startedLesson = before.body.lessons.find((lesson) => lesson.started)!;
     const futureLesson = before.body.lessons.find((lesson) => !lesson.started)!;
+    expect(startedLesson).toMatchObject({
+      classStudyDueDate: shanghaiToday(),
+      hasRecordedAttendance: true,
+      scheduleLocked: false,
+      scheduleEditable: true,
+    });
 
-    const deniedStartedEdit = await monitor.patch<{ error: string }>(
+    const dueDateEdit = await monitor.patch(
       `/classes/${classId}/lessons/${startedLesson.id}`,
-      { title: "班长不应修改的历史课名" },
+      { title: "班长在截止日修正课名" },
     );
-    expect(deniedStartedEdit.status).toBe(400);
-    expect(deniedStartedEdit.body.error).toContain("尚无考勤");
+    expect(dueDateEdit.status).toBe(200);
 
     expect((await monitor.patch(`/classes/${classId}/lessons/${futureLesson.id}`, {
       title: "班长编辑的未来课",
@@ -355,6 +361,7 @@ describe.sequential("API lifecycle and class isolation", () => {
     const firstFuture = beforeRebuild.body.lessons.find((lesson) => !lesson.started)!;
     const rebuilt = await monitor.post<{
       preservedCount: number; replacedCount: number; generatedCount: number;
+      discardedAttendanceLessonCount: number;
     }>(`/classes/${classId}/schedule/rebuild-future`, {
       firstClassStudyDueDate: firstFuture.classStudyDueDate,
       count: 2,
@@ -362,15 +369,20 @@ describe.sequential("API lifecycle and class isolation", () => {
       seriesKey: "wisdom_life",
       startPosition: 3,
       round: 1,
+      confirmDiscardAttendance: true,
     });
     expect(rebuilt.status).toBe(200);
-    expect(rebuilt.body).toMatchObject({ preservedCount: 1, generatedCount: 2 });
+    expect(rebuilt.body).toMatchObject({
+      preservedCount: 0,
+      generatedCount: 2,
+      discardedAttendanceLessonCount: 1,
+    });
 
     const after = await monitor.get<{
       lessons: Array<{ id: number; title: string; started: boolean }>;
     }>(`/classes/${classId}/lessons`);
-    expect(after.body.lessons).toHaveLength(3);
-    expect(after.body.lessons[0]).toMatchObject({ id: startedLesson.id, started: true });
+    expect(after.body.lessons).toHaveLength(2);
+    expect(after.body.lessons.some((lesson) => lesson.id === startedLesson.id)).toBe(false);
 
     expect((await monitor.patch(`/classes/${classId}`, { name: "班长不能改班名" })).status).toBe(403);
     expect((await monitor.post(`/classes/${classId}/groups`, { name: "班长不能建组" })).status).toBe(403);

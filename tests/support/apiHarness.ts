@@ -99,6 +99,10 @@ export class TestApiClient {
   patch<T = Record<string, unknown>>(path: string, body?: unknown): Promise<JsonResponse<T>> {
     return this.json<T>("PATCH", path, body);
   }
+
+  delete<T = Record<string, unknown>>(path: string, body?: unknown): Promise<JsonResponse<T>> {
+    return this.json<T>("DELETE", path, body);
+  }
 }
 
 export interface TestApiServer {

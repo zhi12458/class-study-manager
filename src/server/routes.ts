@@ -19,7 +19,8 @@ import {
   listClassAccesses, loadSessionUser, verifyPassword
 } from "./auth.js";
 import {
-  addScheduleBreak, appendLessons, createClass, insertLesson, lessonHasRecordedAttendance, patchLesson,
+  addScheduleBreak, appendLessons, createClass, deleteLesson, insertLesson, lessonHasRecordedAttendance,
+  lessonScheduleLocked, patchLesson,
   rebuildFutureSchedule, setInitialSchedule, updateFutureCadence
 } from "./services/classes.js";
 import { classifyRosterRows, parseRosterWorkbook, type ImportRow } from "./services/importRoster.js";
@@ -1268,7 +1269,7 @@ export function createApiRouter(db: DatabaseSync) {
     } catch (error) { db.exec("rollback"); throw error; }
   });
 
-  router.get("/classes/:classId/lessons", requireAuth, requireClassAttendanceAccess(db), (req, res) => {
+  router.get("/classes/:classId/lessons", requireAuth, requireClassAttendanceAccess(db), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId); const today = shanghaiToday();
     const lessons = (db.prepare(
       `select id, sequence, sequence as lessonNumber, title, lesson_type as lessonType, cadence_mode as cadenceMode,
@@ -1278,7 +1279,11 @@ export function createApiRouter(db: DatabaseSync) {
          from lessons where class_id = ? order by sequence`
     ).all(classId) as Array<Record<string, unknown>>).map((lesson) => {
       const start = addDays(String(lesson.outlineDueDate), -6); const final = String(lesson.classStudyDueDate);
-      return { ...lesson, started: start <= today, scheduleEditable: final >= today && !lessonHasRecordedAttendance(db, Number(lesson.id)), lockedForMonitor: isMonitorLocked(final, today),
+      const hasRecordedAttendance = lessonHasRecordedAttendance(db, Number(lesson.id));
+      const scheduleLocked = lessonScheduleLocked(db, { id: Number(lesson.id), classStudyDueDate: final }, today);
+      return { ...lesson, started: start <= today, hasRecordedAttendance, scheduleLocked,
+        scheduleEditable: req.user!.isAdmin || !scheduleLocked,
+        lockedForMonitor: isMonitorLocked(final, today),
         status: start > today ? "future" : final >= today ? "current" : "finished" };
     });
     const breaks = db.prepare("select id, start_date as date, start_date as startDate, weeks, reason from schedule_breaks where class_id = ? order by start_date").all(classId);
@@ -1308,7 +1313,7 @@ export function createApiRouter(db: DatabaseSync) {
     res.json({ generatedCount });
   });
 
-  router.post("/classes/:classId/schedule/rebuild-future", requireAuth, requireClassScheduleAccess(db), (req, res) => {
+  router.post("/classes/:classId/schedule/rebuild-future", requireAuth, requireClassScheduleAccess(db), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId);
     const cadenceMode = String(req.body.cadenceMode ?? "") as CadenceMode;
     if (!CADENCE_MODES.includes(cadenceMode)) return void res.status(400).json({ error: "学习模式无效" });
@@ -1325,12 +1330,14 @@ export function createApiRouter(db: DatabaseSync) {
       cadenceMode,
       seriesKey,
       startPosition,
-      round
+      round,
+      confirmDiscardAttendance: req.body.confirmDiscardAttendance === true,
+      allowLockedOverride: req.user!.isAdmin,
     });
     res.json(result);
   });
 
-  router.post("/classes/:classId/lessons/insert", requireAuth, requireClassScheduleAccess(db), (req, res) => {
+  router.post("/classes/:classId/lessons/insert", requireAuth, requireClassScheduleAccess(db), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId);
     const lessonType = String(req.body.lessonType ?? "regular");
     if (!LESSON_TYPES.includes(lessonType as typeof LESSON_TYPES[number])) return void res.status(400).json({ error: "课次类型无效" });
@@ -1343,7 +1350,7 @@ export function createApiRouter(db: DatabaseSync) {
       lessonType: lessonType as typeof LESSON_TYPES[number],
       classStudyDueDate: validDate(req.body.classStudyDueDate),
       coursePosition
-    });
+    }, { allowLockedOverride: req.user!.isAdmin });
     res.json(result);
   });
 
@@ -1353,13 +1360,23 @@ export function createApiRouter(db: DatabaseSync) {
     if (lessonType && !LESSON_TYPES.includes(lessonType as typeof LESSON_TYPES[number])) return void res.status(400).json({ error: "课次类型无效" });
     patchLesson(db, classId, lessonId, { title: req.body.title, lessonType: lessonType as typeof LESSON_TYPES[number] | undefined,
       classStudyDueDate: req.body.classStudyDueDate ? validDate(req.body.classStudyDueDate) : undefined },
-    { futureOnly: req.classPermission === "monitor" });
+    { allowLockedOverride: req.user!.isAdmin });
     res.json({ ok: true });
+  });
+
+  router.delete("/classes/:classId/lessons/:lessonId", requireAuth, requireClassScheduleAccess(db), (req: AuthedRequest, res) => {
+    const result = deleteLesson(db, numberParam(req.params.classId), numberParam(req.params.lessonId), {
+      confirmDiscardAttendance: req.body?.confirmDiscardAttendance === true
+        || req.query.confirmDiscardAttendance === "true",
+      allowLockedOverride: req.user!.isAdmin,
+    });
+    res.json(result);
   });
 
   router.post("/classes/:classId/breaks", requireAuth, requireClassScheduleAccess(db), (req: AuthedRequest, res) => {
     const classId = numberParam(req.params.classId);
-    addScheduleBreak(db, classId, validDate(req.body.startDate ?? req.body.date), Number(req.body.weeks ?? 1), String(req.body.reason ?? "放假/暂停"), req.user!.id);
+    addScheduleBreak(db, classId, validDate(req.body.startDate ?? req.body.date), Number(req.body.weeks ?? 1),
+      String(req.body.reason ?? "放假/暂停"), req.user!.id, { allowLockedOverride: req.user!.isAdmin });
     res.json({ ok: true });
   });
 

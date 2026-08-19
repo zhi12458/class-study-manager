@@ -75,13 +75,21 @@ function applySavedBreaks(db: DatabaseSync, classId: number, lessons: LessonSche
   return scheduled;
 }
 
-function assertLessonsHaveNoAttendance(db: DatabaseSync, classId: number, fromSequence: number): void {
-  const lessonIds = db.prepare(
-    "select id from lessons where class_id = ? and sequence >= ? order by sequence"
-  ).all(classId, fromSequence) as Array<{ id: number }>;
-  if (lessonIds.some((lesson) => lessonHasRecordedAttendance(db, lesson.id))) {
-    throw new Error("待调整课次已有考勤记录，不能重新生成；请保留该课并逐课调整");
+/**
+ * Schedule-wide operations may only touch the continuous suffix after the
+ * final locked lesson. An attendance record only locks the schedule after its
+ * final due date has passed; the due date itself remains adjustable.
+ */
+function adjustableScheduleSuffixStart(
+  db: DatabaseSync,
+  lessons: readonly { id: number; classStudyDueDate: string }[],
+  allowLockedOverride = false,
+): number {
+  if (allowLockedOverride) return 0;
+  for (let index = lessons.length - 1; index >= 0; index -= 1) {
+    if (lessonScheduleLocked(db, lessons[index])) return index + 1;
   }
+  return 0;
 }
 
 /**
@@ -111,6 +119,67 @@ export function lessonHasRecordedAttendance(db: DatabaseSync, lessonId: number):
         )
       limit 1`
   ).get(lessonId));
+}
+
+export function lessonScheduleLocked(
+  db: DatabaseSync,
+  lesson: { id: number; classStudyDueDate: string },
+  today = shanghaiToday(),
+): boolean {
+  return lesson.classStudyDueDate < today && lessonHasRecordedAttendance(db, lesson.id);
+}
+
+type AttendanceDiscardImpact = {
+  discardedAttendanceLessonCount: number;
+  discardedAttendanceEntryCount: number;
+  discardedAttendanceAuditCount: number;
+};
+
+function attendanceDiscardImpact(
+  db: DatabaseSync,
+  lessons: readonly { id: number; lessonType: LessonType }[],
+): AttendanceDiscardImpact {
+  let discardedAttendanceLessonCount = 0;
+  let discardedAttendanceEntryCount = 0;
+  let discardedAttendanceAuditCount = 0;
+  for (const lesson of lessons) {
+    if (!lessonHasRecordedAttendance(db, lesson.id)) continue;
+    discardedAttendanceLessonCount += 1;
+    const entries = db.prepare(
+      `select count(*) as count
+         from attendance_entries
+        where lesson_id = ?
+          and not (? = 'review' and metric = 'outline' and status = 'not_required')`,
+    ).get(lesson.id, lesson.lessonType) as { count: number };
+    const audits = db.prepare(
+      `select count(*) as count
+         from attendance_audit
+        where lesson_id = ?
+          and not (
+            ? = 'review' and metric = 'outline'
+            and previous_status is null and new_status = 'not_required'
+          )`,
+    ).get(lesson.id, lesson.lessonType) as { count: number };
+    discardedAttendanceEntryCount += entries.count;
+    discardedAttendanceAuditCount += audits.count;
+  }
+  return {
+    discardedAttendanceLessonCount,
+    discardedAttendanceEntryCount,
+    discardedAttendanceAuditCount,
+  };
+}
+
+function requireAttendanceDiscardConfirmation(
+  impact: AttendanceDiscardImpact,
+  confirmed: boolean,
+): void {
+  if (impact.discardedAttendanceLessonCount === 0 || confirmed) return;
+  throw new Error(
+    `该操作会清除${impact.discardedAttendanceLessonCount}个尚未截止课次的`
+    + `${impact.discardedAttendanceEntryCount}条考勤和${impact.discardedAttendanceAuditCount}条变更历史；`
+    + "请确认后以 confirmDiscardAttendance=true 重试",
+  );
 }
 
 function resetUnattendedLessonRoster(db: DatabaseSync, lessonId: number): void {
@@ -187,6 +256,98 @@ function shiftSequenceBoundariesForInsertion(db: DatabaseSync, classId: number, 
   }
 }
 
+function shiftSequenceBoundariesForDeletion(db: DatabaseSync, classId: number, deletedSequence: number): void {
+  const offset = 1_000_000;
+  db.prepare("update lessons set sequence = sequence + ? where class_id = ? and sequence > ?")
+    .run(offset, classId, deletedSequence);
+  db.prepare("update lessons set sequence = sequence - ? where class_id = ? and sequence > ?")
+    .run(offset + 1, classId, deletedSequence + offset);
+
+  db.prepare(
+    `update enrollments
+        set active_from_sequence = case when active_from_sequence > ? then active_from_sequence - 1 else active_from_sequence end,
+            inactive_from_sequence = case when inactive_from_sequence > ? then inactive_from_sequence - 1 else inactive_from_sequence end
+      where class_id = ?`
+  ).run(deletedSequence, deletedSequence, classId);
+
+  const groupRows = db.prepare(
+    `select ga.id, ga.enrollment_id as enrollmentId, ga.group_id as groupId,
+            ga.effective_from_sequence as effectiveFromSequence, ga.effective_to_sequence as effectiveToSequence,
+            ga.created_at as createdAt
+       from group_assignments ga
+       join enrollments e on e.id = ga.enrollment_id
+      where e.class_id = ?
+      order by ga.enrollment_id, ga.effective_from_sequence, ga.id`
+  ).all(classId) as Array<{
+    id: number; enrollmentId: number; groupId: number; effectiveFromSequence: number;
+    effectiveToSequence: number | null; createdAt: string;
+  }>;
+  db.prepare("delete from group_assignments where enrollment_id in (select id from enrollments where class_id = ?)")
+    .run(classId);
+  const insertGroup = db.prepare(
+    `insert into group_assignments
+       (id, enrollment_id, group_id, effective_from_sequence, effective_to_sequence, created_at)
+     values (?, ?, ?, ?, ?, ?)`
+  );
+  for (const row of groupRows) {
+    const from = row.effectiveFromSequence > deletedSequence ? row.effectiveFromSequence - 1 : row.effectiveFromSequence;
+    const to = row.effectiveToSequence != null && row.effectiveToSequence > deletedSequence
+      ? row.effectiveToSequence - 1 : row.effectiveToSequence;
+    if (to != null && to <= from) continue;
+    insertGroup.run(row.id, row.enrollmentId, row.groupId, from, to, row.createdAt);
+  }
+
+  const statusRows = db.prepare(
+    `select es.id, es.enrollment_id as enrollmentId, es.status,
+            es.effective_from_sequence as effectiveFromSequence, es.effective_to_sequence as effectiveToSequence,
+            es.created_at as createdAt
+       from enrollment_status_history es
+       join enrollments e on e.id = es.enrollment_id
+      where e.class_id = ?
+      order by es.enrollment_id, es.effective_from_sequence, es.id`
+  ).all(classId) as Array<{
+    id: number; enrollmentId: number; status: string; effectiveFromSequence: number;
+    effectiveToSequence: number | null; createdAt: string;
+  }>;
+  db.prepare("delete from enrollment_status_history where enrollment_id in (select id from enrollments where class_id = ?)")
+    .run(classId);
+  const insertStatus = db.prepare(
+    `insert into enrollment_status_history
+       (id, enrollment_id, status, effective_from_sequence, effective_to_sequence, created_at)
+     values (?, ?, ?, ?, ?, ?)`
+  );
+  for (const row of statusRows) {
+    const from = row.effectiveFromSequence > deletedSequence ? row.effectiveFromSequence - 1 : row.effectiveFromSequence;
+    const to = row.effectiveToSequence != null && row.effectiveToSequence > deletedSequence
+      ? row.effectiveToSequence - 1 : row.effectiveToSequence;
+    if (to != null && to <= from) continue;
+    insertStatus.run(row.id, row.enrollmentId, row.status, from, to, row.createdAt);
+  }
+}
+
+function assertEnrollmentBoundariesSurviveDeletion(
+  db: DatabaseSync,
+  classId: number,
+  deletedSequence: number,
+): void {
+  const collapsed = db.prepare(
+    `select p.name, p.dharma_name as dharmaName
+       from enrollments e
+       join persons p on p.id = e.person_id
+      where e.class_id = ?
+        and e.active_from_sequence = ?
+        and e.inactive_from_sequence = ?
+      order by e.id
+      limit 1`,
+  ).get(classId, deletedSequence, deletedSequence + 1) as {
+    name: string;
+    dharmaName: string | null;
+  } | undefined;
+  if (!collapsed) return;
+  const studentName = collapsed.dharmaName?.trim() || collapsed.name.trim() || "该学员";
+  throw new Error(`不能删除：${studentName}的学籍只在本课生效，请先调整该学员的入班或停用课次`);
+}
+
 export function createClass(db: DatabaseSync, input: {
   name: string; counselorUserId: number; createdBy: number; groupCount: number;
   cadenceMode: CadenceMode; firstDueDate?: string; lessonCount?: number; meetingTime?: string | null;
@@ -256,18 +417,24 @@ export function rebuildFutureSchedule(
     seriesKey: string;
     startPosition: number;
     round: number;
+    confirmDiscardAttendance?: boolean;
+    allowLockedOverride?: boolean;
   }
-): { preservedCount: number; replacedCount: number; generatedCount: number; firstFutureSequence: number } {
+): {
+  preservedCount: number;
+  replacedCount: number;
+  generatedCount: number;
+  firstFutureSequence: number;
+} & AttendanceDiscardImpact {
   if (!Number.isInteger(input.count) || input.count < 1 || input.count > 100) throw new Error("课次数量必须为1至100");
   freezeStartedLessons(db, classId);
   const existing = lessonRows(db, classId);
-  const today = shanghaiToday();
-  const firstFutureIndex = existing.findIndex(
-    (lesson) => lesson.classStudyDueDate >= today && !lessonHasRecordedAttendance(db, lesson.id)
-  );
-  if (firstFutureIndex < 0) throw new Error("没有当前或未来且尚无考勤的课次可以重新生成");
+  const firstFutureIndex = adjustableScheduleSuffixStart(db, existing, input.allowLockedOverride === true);
+  if (firstFutureIndex >= existing.length) throw new Error("最后一个已锁定课次之后，没有可重新生成的课次");
   const firstFutureSequence = existing[firstFutureIndex].sequence;
-  assertLessonsHaveNoAttendance(db, classId, firstFutureSequence);
+  const replacedLessons = existing.slice(firstFutureIndex);
+  const discardImpact = attendanceDiscardImpact(db, replacedLessons);
+  requireAttendanceDiscardConfirmation(discardImpact, input.confirmDiscardAttendance === true);
   const plan = catalogPlan(db, input.seriesKey, input.startPosition, input.count);
   const generated = applySavedBreaks(db, classId, generateSchedule({
     firstFinalDueDate: input.firstDueDate,
@@ -277,7 +444,7 @@ export function rebuildFutureSchedule(
     titles: plan.titles,
     lessonTypes: plan.lessonTypes
   }));
-  const replacedCount = existing.length - firstFutureIndex;
+  const replacedCount = replacedLessons.length;
 
   db.exec("begin immediate");
   try {
@@ -298,7 +465,8 @@ export function rebuildFutureSchedule(
     preservedCount: firstFutureIndex,
     replacedCount,
     generatedCount: generated.length,
-    firstFutureSequence
+    firstFutureSequence,
+    ...discardImpact,
   };
 }
 
@@ -311,16 +479,21 @@ export function insertLesson(
     lessonType: LessonType;
     classStudyDueDate: string;
     coursePosition?: number | null;
-  }
+  },
+  options: { allowLockedOverride?: boolean } = {},
 ): { lessonId: number; sequence: number } {
   freezeStartedLessons(db, classId);
   const existing = lessonRows(db, classId);
   const target = existing.find((lesson) => lesson.id === input.beforeLessonId);
   if (!target) throw new Error("插入位置不存在");
-  if (target.classStudyDueDate < shanghaiToday()) throw new Error("只能在当前或未来课次之前插入");
-  const affectedLessons = existing.slice(existing.indexOf(target));
-  if (affectedLessons.some((lesson) => lessonHasRecordedAttendance(db, lesson.id))) {
-    throw new Error("插入位置或后续课次已有考勤记录，不能整体顺延");
+  const targetIndex = existing.indexOf(target);
+  const adjustableStart = adjustableScheduleSuffixStart(db, existing, options.allowLockedOverride === true);
+  if (targetIndex < adjustableStart) {
+    throw new Error("只能在最后一个已锁定课次之后插入，避免移动已锁定课次");
+  }
+  const affectedLessons = existing.slice(targetIndex);
+  if (!options.allowLockedOverride && affectedLessons.some((lesson) => lessonScheduleLocked(db, lesson))) {
+    throw new Error("插入位置或后续存在已截止且已有考勤的锁定课次，不能整体顺延");
   }
   if (!input.title.trim()) throw new Error("课名不能为空");
   const targetRoster = target.frozenAt ? db.prepare(
@@ -357,7 +530,9 @@ export function insertLesson(
 
   db.exec("begin immediate");
   try {
-    for (const lesson of affectedLessons) if (lesson.frozenAt) resetUnattendedLessonRoster(db, lesson.id);
+    for (const lesson of affectedLessons) {
+      if (lesson.frozenAt && !lessonHasRecordedAttendance(db, lesson.id)) resetUnattendedLessonRoster(db, lesson.id);
+    }
     shiftSequenceBoundariesForInsertion(db, classId, target.sequence);
     const inserted = rebuilt[0];
     const result = db.prepare(
@@ -388,6 +563,44 @@ export function insertLesson(
   }
 }
 
+export function deleteLesson(
+  db: DatabaseSync,
+  classId: number,
+  lessonId: number,
+  options: { confirmDiscardAttendance?: boolean; allowLockedOverride?: boolean } = {},
+): {
+  deletedSequence: number;
+  deletedTitle: string;
+  renumberedFutureLessons: boolean;
+} & AttendanceDiscardImpact {
+  freezeStartedLessons(db, classId);
+  const target = lessonRows(db, classId).find((lesson) => lesson.id === lessonId);
+  if (!target) throw new Error("课次不存在");
+  if (!options.allowLockedOverride && lessonScheduleLocked(db, target)) {
+    throw new Error("本课已截止且已有考勤记录，课表已锁定，不能删除");
+  }
+  const discardImpact = attendanceDiscardImpact(db, [target]);
+  requireAttendanceDiscardConfirmation(discardImpact, options.confirmDiscardAttendance === true);
+  const isFutureLesson = addDays(target.outlineDueDate, -6) > shanghaiToday();
+  if (isFutureLesson) assertEnrollmentBoundariesSurviveDeletion(db, classId, target.sequence);
+
+  db.exec("begin immediate");
+  try {
+    db.prepare("delete from lessons where id = ? and class_id = ?").run(lessonId, classId);
+    if (isFutureLesson) shiftSequenceBoundariesForDeletion(db, classId, target.sequence);
+    db.exec("commit");
+    return {
+      deletedSequence: target.sequence,
+      deletedTitle: target.title,
+      renumberedFutureLessons: isFutureLesson,
+      ...discardImpact,
+    };
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
 export function setInitialSchedule(
   db: DatabaseSync,
   classId: number,
@@ -403,10 +616,10 @@ export function setInitialSchedule(
   const plan = course
     ? catalogPlan(db, course.seriesKey, course.startPosition, count)
     : { ...coursePlanForRange(1, count), positions: [] as number[] };
-  const generated = generateSchedule({
+  const generated = applySavedBreaks(db, classId, generateSchedule({
     firstFinalDueDate: firstDueDate, count: plan.titles.length, cadenceMode,
     titles: plan.titles, lessonTypes: plan.lessonTypes
-  });
+  }));
   db.exec("begin immediate");
   try {
     if (cadenceOverride) {
@@ -465,27 +678,28 @@ export function updateFutureCadence(
 
 export function patchLesson(db: DatabaseSync, classId: number, lessonId: number, patch: {
   title?: string; lessonType?: LessonType; classStudyDueDate?: string;
-}, options: { futureOnly?: boolean } = {}): void {
+}, options: { allowLockedOverride?: boolean } = {}): void {
   freezeStartedLessons(db, classId);
   const rows = lessonRows(db, classId);
   const target = rows.find((lesson) => lesson.id === lessonId);
   if (!target) throw new Error("课次不存在");
   const hasAttendance = lessonHasRecordedAttendance(db, target.id);
-  const lessonHasEnded = target.classStudyDueDate < shanghaiToday();
+  const scheduleLocked = lessonScheduleLocked(db, target);
   const changesType = patch.lessonType !== undefined && patch.lessonType !== target.lessonType;
   const changesDate = patch.classStudyDueDate !== undefined && patch.classStudyDueDate !== target.classStudyDueDate;
-  if (options.futureOnly && (lessonHasEnded || hasAttendance)) throw new Error("班长只能修改当前或未来且尚无考勤的课次");
-  if (lessonHasEnded && (changesType || changesDate)) throw new Error("已结束课次不能修改类型或日期");
-  if (hasAttendance && (changesType || changesDate)) throw new Error("本课已有考勤记录，不能修改类型或日期");
+  if (!options.allowLockedOverride && scheduleLocked) throw new Error("本课已截止且已有考勤记录，课表已锁定，不能修改");
+  if (hasAttendance && changesType) throw new Error("本课已有考勤记录，不能修改课次类型");
   const affectedByDateChange = changesDate ? rows.filter((lesson) => lesson.sequence >= target.sequence) : [];
-  if (affectedByDateChange.some((lesson) => lessonHasRecordedAttendance(db, lesson.id))) {
-    throw new Error("本课或后续课次已有考勤记录，不能整体顺延");
+  if (!options.allowLockedOverride && affectedByDateChange.some((lesson) => lessonScheduleLocked(db, lesson))) {
+    throw new Error("本课或后续存在已截止且已有考勤的锁定课次，不能整体顺延");
   }
   db.exec("begin immediate");
   try {
     const rostersToReset = new Set<number>();
     if (changesType && target.frozenAt) rostersToReset.add(target.id);
-    for (const lesson of affectedByDateChange) if (lesson.frozenAt) rostersToReset.add(lesson.id);
+    for (const lesson of affectedByDateChange) {
+      if (lesson.frozenAt && !lessonHasRecordedAttendance(db, lesson.id)) rostersToReset.add(lesson.id);
+    }
     for (const affectedLessonId of rostersToReset) resetUnattendedLessonRoster(db, affectedLessonId);
     if (patch.title !== undefined) {
       if (!patch.title.trim()) throw new Error("课名不能为空");
@@ -508,7 +722,15 @@ export function patchLesson(db: DatabaseSync, classId: number, lessonId: number,
   } catch (error) { db.exec("rollback"); throw error; }
 }
 
-export function addScheduleBreak(db: DatabaseSync, classId: number, startsOn: string, weeks: number, reason: string, userId: number): void {
+export function addScheduleBreak(
+  db: DatabaseSync,
+  classId: number,
+  startsOn: string,
+  weeks: number,
+  reason: string,
+  userId: number,
+  options: { allowLockedOverride?: boolean } = {},
+): void {
   if (!Number.isInteger(weeks) || weeks < 1 || weeks > 52) throw new Error("暂停周数必须为1至52");
   freezeStartedLessons(db, classId);
   const originalRows = lessonRows(db, classId);
@@ -520,14 +742,17 @@ export function addScheduleBreak(db: DatabaseSync, classId: number, startsOn: st
       || lesson.groupStudyDueDate !== original.groupStudyDueDate
       || lesson.classStudyDueDate !== original.classStudyDueDate;
   });
-  if (changedLessons.some((lesson) => lessonHasRecordedAttendance(db, lesson.id))) {
-    throw new Error("暂停周影响的课次已有考勤记录，不能整体顺延");
+  if (!options.allowLockedOverride && changedLessons.some((lesson) => {
+    const original = originalRows.find((row) => row.id === lesson.id)!;
+    return lessonScheduleLocked(db, original);
+  })) {
+    throw new Error("暂停周影响到已截止且已有考勤的锁定课次，不能整体顺延");
   }
   db.exec("begin immediate");
   try {
     for (const lesson of changedLessons) {
       const original = originalRows.find((row) => row.id === lesson.id)!;
-      if (original.frozenAt) resetUnattendedLessonRoster(db, lesson.id);
+      if (original.frozenAt && !lessonHasRecordedAttendance(db, lesson.id)) resetUnattendedLessonRoster(db, lesson.id);
     }
     const update = db.prepare(
       `update lessons set outline_due_date = ?, group_study_due_date = ?, class_study_due_date = ?, updated_at = current_timestamp where id = ?`

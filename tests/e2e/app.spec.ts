@@ -91,8 +91,13 @@ test("主要管理页面和考勤保存流程可操作", async ({ page }, testIn
   await expect(page.getByText("考勤已保存，并记录了本次修改人和时间")).toBeVisible();
 
   await navigate(page, "课表安排");
-  await page.getByRole("button", { name: "重新生成未登记课表" }).click();
-  await expect(page.getByRole("dialog", { name: "重新生成未登记课表" })).toBeVisible();
+  await expect(page.getByText(/截止日当天仍可调整/)).toBeVisible();
+  const lockedLessonEdit = page.getByRole("button", { name: "编辑第 1 个课次" });
+  await expect(lockedLessonEdit).toBeEnabled();
+  await expect(lockedLessonEdit).toHaveAttribute("title", /管理员可编辑/);
+  await page.getByRole("button", { name: "重新生成可调整课表" }).click();
+  const rebuildDialog = page.getByRole("dialog", { name: "重新生成可调整课表" });
+  await expect(rebuildDialog).toBeVisible();
   await page.keyboard.press("Escape");
 
   await navigate(page, "学员名单");
@@ -112,7 +117,7 @@ test("班长可管理未来课表但看不到其他班级管理入口", async ({
 
   await expect(page.getByRole("button", { name: "放假 / 暂停周" })).toBeVisible();
   await expect(page.getByRole("button", { name: "插入课次" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "重新生成未登记课表" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "重新生成可调整课表" })).toBeVisible();
   await expect(page.getByRole("button", { name: "追加课次" })).toBeVisible();
 
   await page.getByRole("button", { name: "编辑第 3 个课次" }).click();
@@ -123,8 +128,8 @@ test("班长可管理未来课表但看不到其他班级管理入口", async ({
   expect((await saveResponse).status()).toBe(200);
   await expect(page.getByText("班长更新的未来课", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "重新生成未登记课表" }).click();
-  const rebuild = page.getByRole("dialog", { name: "重新生成未登记课表" });
+  await page.getByRole("button", { name: "重新生成可调整课表" }).click();
+  const rebuild = page.getByRole("dialog", { name: "重新生成可调整课表" });
   await expect(rebuild.getByRole("button", { name: "刷新目录" })).toHaveCount(0);
   await page.keyboard.press("Escape");
 });

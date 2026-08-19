@@ -23,6 +23,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Upload,
   UserCog,
   UserPlus,
@@ -200,6 +201,13 @@ function studentFromRaw(raw: Record<string, unknown>): Student {
 }
 
 function lessonFromRaw(raw: Record<string, unknown>): Lesson {
+  const classStudyDueDate = dateOnly(raw.classStudyDueDate ?? raw.dueDate);
+  const hasRecordedAttendance = raw.hasRecordedAttendance == null
+    ? raw.scheduleEditable === false
+    : Boolean(raw.hasRecordedAttendance);
+  const scheduleLocked = raw.scheduleLocked == null
+    ? hasRecordedAttendance && classStudyDueDate < shanghaiTodayClient()
+    : Boolean(raw.scheduleLocked);
   return {
     id: Number(raw.id ?? raw.lessonId),
     lessonNumber: Number(raw.sequence ?? raw.lessonNumber ?? raw.number ?? 0),
@@ -209,12 +217,23 @@ function lessonFromRaw(raw: Record<string, unknown>): Lesson {
     cadenceMode: (raw.cadenceMode ?? "same_week") as CadenceMode,
     outlineDueDate: dateOnly(raw.outlineDueDate ?? raw.outlineDate),
     groupStudyDueDate: dateOnly(raw.groupStudyDueDate ?? raw.groupDate),
-    classStudyDueDate: dateOnly(raw.classStudyDueDate ?? raw.dueDate),
+    classStudyDueDate,
     started: Boolean(raw.started),
-    scheduleEditable: raw.scheduleEditable == null ? !Boolean(raw.started) : Boolean(raw.scheduleEditable),
+    hasRecordedAttendance,
+    scheduleLocked,
+    scheduleEditable: raw.scheduleEditable == null ? !scheduleLocked : Boolean(raw.scheduleEditable),
     lockedForMonitor: Boolean(raw.lockedForMonitor),
     status: raw.status as Lesson["status"]
   };
+}
+
+function adjustableScheduleSuffix(lessons: Lesson[]): Lesson[] {
+  const ordered = [...lessons].sort((left, right) => left.lessonNumber - right.lessonNumber);
+  let lastUneditableIndex = -1;
+  ordered.forEach((lesson, index) => {
+    if (!lesson.scheduleEditable) lastUneditableIndex = index;
+  });
+  return ordered.slice(lastUneditableIndex + 1);
 }
 
 function formatRate(summary?: MetricSummary) {
@@ -1327,15 +1346,23 @@ function LessonEditor({ classId, lesson, onClose, onSaved }: { classId: number; 
   async function submit(event: FormEvent) {
     event.preventDefault(); setLoading(true);
     try {
-      await apiJson(`/api/classes/${classId}/lessons/${lesson.id}`, { method: "PATCH", body: JSON.stringify({ title, lessonType, classStudyDueDate }) });
+      await apiJson(`/api/classes/${classId}/lessons/${lesson.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title, ...(!lesson.hasRecordedAttendance ? { lessonType } : {}), classStudyDueDate })
+      });
       await onSaved(); onClose();
     } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
     finally { setLoading(false); }
   }
-  return <Modal title={`编辑第 ${lesson.lessonNumber} 个课次`} subtitle="本课尚无考勤记录，可以修改；修改日期会让本课及后续可调整的安排整体顺延。" onClose={onClose}>
+  const editorSubtitle = lesson.scheduleLocked && lesson.scheduleEditable
+    ? "本课底层状态已锁定，管理员仍可修改课名和日期；已有考勤会保留，课次类型不可更改。"
+    : lesson.hasRecordedAttendance
+      ? "本课已有考勤但尚未过整课截止日，仍可修改课名和日期；考勤会保留，课次类型不可更改。"
+      : "本课没有考勤，即使日期已过也可以修改；修改日期会让本课及后续可调整的安排整体顺延。";
+  return <Modal title={`编辑第 ${lesson.lessonNumber} 个课次`} subtitle={editorSubtitle} onClose={onClose}>
     <form className="form-stack" onSubmit={submit}>
       <label>课次名称<input value={title} onChange={(e) => setTitle(e.target.value)} required /></label>
-      <label>课次类型<select value={lessonType} onChange={(e) => setLessonType(e.target.value as Lesson["lessonType"])}><option value="regular">普通课</option><option value="review">复习课（导图/提纲自动不需要）</option></select></label>
+      <label>课次类型<select value={lessonType} onChange={(e) => setLessonType(e.target.value as Lesson["lessonType"])} disabled={lesson.hasRecordedAttendance}><option value="regular">普通课</option><option value="review">复习课（导图/提纲自动不需要）</option></select>{lesson.hasRecordedAttendance && <small>本课已有考勤，为避免改变导图/提纲适用规则，课次类型不可更改。</small>}</label>
       <div className="auto-date-preview"><span><small>当前导图/提纲日期</small>{lesson.lessonType === "review" ? "不需要" : lesson.outlineDueDate}</span><span><small>当前组修日期</small>{lesson.groupStudyDueDate}</span></div>
       <label>班修 / 整课截止日<input type="date" lang="zh-CN" value={classStudyDueDate} onChange={(e) => setClassDate(e.target.value)} required /><small>已选择：{classStudyDueDate || "未选择"}（YYYY-MM-DD）。导图/提纲与组修日期会自动计算。</small></label>
       <Notice notice={notice} />
@@ -1353,9 +1380,10 @@ function InsertLesson({ classId, lessons, seriesKey, onClose, onSaved }: {
   onClose: () => void;
   onSaved: () => Promise<void>;
 }) {
-  const futureLessons = lessons.filter((lesson) => lesson.scheduleEditable);
-  const [beforeLessonId, setBeforeLessonId] = useState(String(futureLessons[0]?.id ?? ""));
-  const target = futureLessons.find((lesson) => String(lesson.id) === beforeLessonId) ?? futureLessons[0];
+  const insertableLessons = adjustableScheduleSuffix(lessons);
+  const canOverrideLocked = insertableLessons.some((lesson) => lesson.scheduleLocked && lesson.scheduleEditable);
+  const [beforeLessonId, setBeforeLessonId] = useState(String(insertableLessons[0]?.id ?? ""));
+  const target = insertableLessons.find((lesson) => String(lesson.id) === beforeLessonId) ?? insertableLessons[0];
   const [catalog, setCatalog] = useState<CourseSeriesOption[]>([]);
   const [coursePosition, setCoursePosition] = useState("");
   const [title, setTitle] = useState("");
@@ -1385,7 +1413,7 @@ function InsertLesson({ classId, lessons, seriesKey, onClose, onSaved }: {
   }
   function chooseTarget(value: string) {
     setBeforeLessonId(value);
-    const nextTarget = futureLessons.find((lesson) => String(lesson.id) === value);
+    const nextTarget = insertableLessons.find((lesson) => String(lesson.id) === value);
     if (nextTarget) setClassStudyDueDate(nextTarget.classStudyDueDate);
   }
   async function submit(event: FormEvent) {
@@ -1408,9 +1436,9 @@ function InsertLesson({ classId, lessons, seriesKey, onClose, onSaved }: {
     finally { setLoading(false); }
   }
 
-  return <Modal title="插入课次" subtitle="新增一个真正的课次，原插入位置及后续安排会整体后移。" onClose={onClose}>
-    {!target ? <EmptyState title="没有可插入的位置" detail="当前和未来课次均已有考勤，或课表已经结束。" /> : <form className="form-stack" onSubmit={submit}>
-      <label>插入位置<select value={beforeLessonId} onChange={(event) => chooseTarget(event.target.value)}>{futureLessons.map((lesson) => <option key={lesson.id} value={lesson.id}>第 {lesson.lessonNumber} 个课次之前 · {lesson.title}</option>)}</select><small>本周尚无考勤时也可插入；新课及后续课次会依次后移。</small></label>
+  return <Modal title="插入课次" subtitle={canOverrideLocked ? "管理员可从全课表选择插入位置；原插入位置及后续课次会整体后移，已有考勤随原课次保留。" : "只在最后一个已锁定课次之后插入；原插入位置及后续可调整课次会整体后移，已有考勤随原课次保留。"} onClose={onClose}>
+    {!target ? <EmptyState title="没有可插入的位置" detail="当前权限下没有可调整课次；如需继续排课，请使用追加课次。" /> : <form className="form-stack" onSubmit={submit}>
+      <label>插入位置<select value={beforeLessonId} onChange={(event) => chooseTarget(event.target.value)}>{insertableLessons.map((lesson) => <option key={lesson.id} value={lesson.id}>第 {lesson.lessonNumber} 个课次之前 · {lesson.title}</option>)}</select><small>{canOverrideLocked ? "管理员可越过底层锁定状态；" : "其他角色只能调整最后一个已锁定课次之后的范围；"}移动课次不会清空已有考勤。</small></label>
       {series && <label>从“{series.displayName}”课程目录选择（选填）<select value={coursePosition} onChange={(event) => chooseCatalogItem(event.target.value)}><option value="">自定义课次</option>{series.items.map((item) => <option key={item.position} value={item.position}>{item.title}</option>)}</select></label>}
       <label>课次名称<input value={title} onChange={(event) => { setTitle(event.target.value); setCoursePosition(""); }} required /></label>
       <label>课次类型<select value={lessonType} onChange={(event) => { setLessonType(event.target.value as Lesson["lessonType"]); setCoursePosition(""); }}><option value="regular">普通课</option><option value="review">复习课（导图/提纲自动不需要）</option></select></label>
@@ -1429,14 +1457,20 @@ function RebuildFutureSchedule({ classId, lessons, currentClass, canSync, onClos
   onClose: () => void;
   onSaved: () => Promise<void>;
 }) {
-  const futureLessons = lessons.filter((lesson) => lesson.scheduleEditable);
-  const preservedCount = lessons.length - futureLessons.length;
-  const [firstDueDate, setFirstDueDate] = useState(futureLessons[0]?.classStudyDueDate ?? "");
-  const [count, setCount] = useState(futureLessons.length || 24);
+  const replaceableLessons = adjustableScheduleSuffix(lessons);
+  const replaceableIds = new Set(replaceableLessons.map((lesson) => lesson.id));
+  const preservedLessons = lessons.filter((lesson) => !replaceableIds.has(lesson.id));
+  const preservedCount = lessons.length - replaceableLessons.length;
+  const preservedLockedCount = preservedLessons.filter((lesson) => lesson.scheduleLocked).length;
+  const affectedAttendanceCount = replaceableLessons.filter((lesson) => lesson.hasRecordedAttendance).length;
+  const protectedAdjustableCount = preservedCount - preservedLockedCount;
+  const canOverrideLocked = replaceableLessons.some((lesson) => lesson.scheduleLocked && lesson.scheduleEditable);
+  const [firstDueDate, setFirstDueDate] = useState(replaceableLessons[0]?.classStudyDueDate ?? "");
+  const [count, setCount] = useState(replaceableLessons.length || 24);
   const [cadenceMode, setCadenceMode] = useState<CadenceMode>(currentClass.cadenceMode ?? "same_week");
   const [series, setSeries] = useState<CourseSeriesOption[]>([]);
   const [seriesKey, setSeriesKey] = useState(currentClass.courseSeriesKey ?? "wisdom_life");
-  const [startPosition, setStartPosition] = useState(futureLessons[0]?.coursePosition ?? ((currentClass.courseStartPosition ?? 1) + preservedCount));
+  const [startPosition, setStartPosition] = useState(replaceableLessons[0]?.coursePosition ?? ((currentClass.courseStartPosition ?? 1) + preservedCount));
   const [round, setRound] = useState(currentClass.courseRound ?? 1);
   const [notice, setNotice] = useState<NoticeState>(null);
   const [loading, setLoading] = useState(false);
@@ -1461,13 +1495,15 @@ function RebuildFutureSchedule({ classId, lessons, currentClass, canSync, onClos
   }
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!futureLessons.length) return;
-    if (!window.confirm(`将保留 ${preservedCount} 个已开始课次，替换 ${futureLessons.length} 个未来课次，并生成 ${count} 个新课次。确定继续吗？`)) return;
+    if (!replaceableLessons.length) return;
+    const protectedDetail = protectedAdjustableCount > 0 ? `（含 ${protectedAdjustableCount} 个位于最后锁定课次之前的可调整课次）` : "";
+    if (!window.confirm(`将保留前面的 ${preservedCount} 个课次${protectedDetail}，替换其后的 ${replaceableLessons.length} 个可调整课次，并生成 ${count} 个新课次。确定继续吗？`)) return;
+    if (affectedAttendanceCount > 0 && !window.confirm(`替换范围内有 ${affectedAttendanceCount} 个课次已经填写考勤。继续操作会永久清空这些课次的全部考勤及变更历史，且无法恢复。\n\n请再次确认是否继续。`)) return;
     setLoading(true); setNotice(null);
     try {
       await apiJson(`/api/classes/${classId}/schedule/rebuild-future`, {
         method: "POST",
-        body: JSON.stringify({ firstClassStudyDueDate: firstDueDate, count, cadenceMode, seriesKey, startPosition, round })
+        body: JSON.stringify({ firstClassStudyDueDate: firstDueDate, count, cadenceMode, seriesKey, startPosition, round, confirmDiscardAttendance: affectedAttendanceCount > 0 })
       });
       await onSaved(); onClose();
     } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
@@ -1475,16 +1511,16 @@ function RebuildFutureSchedule({ classId, lessons, currentClass, canSync, onClos
   }
   const selectedSeries = series.find((entry) => entry.key === seriesKey);
 
-  return <Modal title="重新生成未登记课表" subtitle="历史课次和已有考勤不会被改动；本周尚无考勤时也可纳入重新生成。" onClose={onClose}>
-    {!futureLessons.length ? <EmptyState title="没有可重新生成的课次" detail="当前和未来课次均已有考勤，或课表已经结束；请使用追加课次功能。" /> : <form className="form-stack" onSubmit={submit}>
-      <div className="callout"><strong>变更预览</strong><span>保留 {preservedCount} 个历史或已有考勤课次 · 替换 {futureLessons.length} 个未登记课次 · 新生成 {count} 个课次</span></div>
+  return <Modal title="重新生成可调整课表" subtitle={canOverrideLocked ? "管理员可重新生成全课表，包括底层已锁定课次；替换范围内已有的考勤会在二次确认后清空。" : "最后一个已锁定课次之后，历史、当前或未来课次都可重新生成；替换范围内已有的考勤会在二次确认后清空。"} onClose={onClose}>
+    {!replaceableLessons.length ? <EmptyState title="没有可重新生成的课次" detail="当前权限下没有可调整课次；如需继续排课，请使用追加课次。" /> : <form className="form-stack" onSubmit={submit}>
+      <div className="callout"><strong>变更预览</strong><span>{preservedCount > 0 ? `保留前面的 ${preservedCount} 个课次（${preservedLockedCount} 个已锁定${protectedAdjustableCount > 0 ? `，${protectedAdjustableCount} 个位于最后不可调整课次之前` : ""}）` : "不保留原课次"} · 替换 {replaceableLessons.length} 个可调整课次{affectedAttendanceCount > 0 ? `（其中 ${affectedAttendanceCount} 个已有考勤，将被清空）` : ""} · 新生成 {count} 个课次</span></div>
       <div className="form-grid two"><label>课程体系<select value={seriesKey} onChange={(event) => { setSeriesKey(event.target.value); setStartPosition(1); }}>{series.map((entry) => <option value={entry.key} key={entry.key}>{entry.displayName}</option>)}</select></label><label>第几遍<input type="number" min={1} max={20} value={round} onChange={(event) => setRound(Number(event.target.value))} /></label></div>
       <label>从哪一课开始<select value={startPosition} onChange={(event) => setStartPosition(Number(event.target.value))}>{selectedSeries?.items.map((item) => <option key={item.position} value={item.position}>{item.title}</option>)}</select></label>
       {canSync && <div className="template-download"><div><strong>需要采用最新课程时</strong><span>先刷新目录，再选择新的课程起点。</span></div><button type="button" className="secondary" onClick={() => void syncCatalog()} disabled={loading}><RefreshCw size={16} /> 刷新目录</button></div>}
       <label>第一个新课次班修 / 整课截止日<input type="date" lang="zh-CN" value={firstDueDate} onChange={(event) => setFirstDueDate(event.target.value)} required /><small>已选择：{firstDueDate || "未选择"}（YYYY-MM-DD）。原有放假/暂停周继续保留。</small></label>
       <div className="form-grid two"><label>生成课数<input type="number" min={1} max={100} value={count} onChange={(event) => setCount(Number(event.target.value))} required /></label><label>学习模式<select value={cadenceMode} onChange={(event) => setCadenceMode(event.target.value as CadenceMode)}><option value="same_week">同周完成</option><option value="parallel_two_week">平行两周</option></select></label></div>
       <Notice notice={notice} />
-      <div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>取消</button><button className="primary" disabled={loading}>{loading ? "重新生成中..." : "重新生成未来课表"}</button></div>
+      <div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>取消</button><button className="primary" disabled={loading}>{loading ? "重新生成中..." : "重新生成可调整课表"}</button></div>
     </form>}
   </Modal>;
 }
@@ -1556,7 +1592,7 @@ function AddBreak({ classId, onClose, onSaved }: { classId: number; onClose: () 
     } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
     finally { setLoading(false); }
   }
-  return <Modal title="插入放假 / 暂停周" subtitle="该周不考勤、不统计；本周尚无考勤时也可暂停，并顺延受影响的未登记课次。" onClose={onClose}>
+  return <Modal title="插入放假 / 暂停周" subtitle="该周不考勤、不统计；后续可调整课次整体顺延，已有考勤随原课次保留，不会被清空。" onClose={onClose}>
     <form className="form-stack" onSubmit={submit}><label>暂停周日期<input type="date" value={date} onChange={(e) => setDate(e.target.value)} required /></label><label>说明<input value={title} onChange={(e) => setTitle(e.target.value)} required /></label><Notice notice={notice} /><div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>取消</button><button className="primary" disabled={loading}>{loading ? "插入中..." : "插入并顺延"}</button></div></form>
   </Modal>;
 }
@@ -1586,6 +1622,30 @@ function LessonsPage({ currentClass, isAdmin, onClassRefresh }: { currentClass: 
   }, [currentClass.id]);
   useEffect(() => { void load(); }, [load]);
   const reloadScheduleAndClass = useCallback(async () => { await Promise.all([load(), onClassRefresh()]); }, [load, onClassRefresh]);
+  const adjustableSuffix = adjustableScheduleSuffix(lessons);
+
+  async function removeLesson(lesson: Lesson) {
+    if (!lesson.scheduleEditable) return;
+    const futureLesson = !lesson.started;
+    const overrideNotice = lesson.scheduleLocked ? "本课底层状态已锁定，管理员正在越过锁定删除。\n" : "";
+    const impact = futureLesson
+      ? "后续未来课次编号会依次前移，原有日期保持不变。"
+      : "这是已开始或历史课次；删除后会保留后续课次原编号和原日期，课次编号可能出现空号。";
+    if (!window.confirm(`${overrideNotice}确定删除第 ${lesson.lessonNumber} 个课次“${lesson.title}”吗？\n\n${impact}`)) return;
+    if (lesson.hasRecordedAttendance && !window.confirm("本课已经填写考勤。继续删除会永久清空本课全部学员的考勤及变更历史，且无法恢复。\n\n请再次确认是否删除。")) return;
+    setLoading(true); setNotice(null);
+    try {
+      await apiJson(`/api/classes/${currentClass.id}/lessons/${lesson.id}`, {
+        method: "DELETE",
+        body: JSON.stringify({ confirmDiscardAttendance: Boolean(lesson.hasRecordedAttendance) })
+      });
+      setNotice({ tone: "success", text: futureLesson
+        ? `已删除“${lesson.title}”${lesson.hasRecordedAttendance ? "并清空本课考勤" : ""}，后续未来课次已重新编号`
+        : `已删除“${lesson.title}”${lesson.hasRecordedAttendance ? "并清空本课考勤" : ""}，后续课次的原编号和日期均已保留` });
+      await reloadScheduleAndClass();
+    } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
+    finally { setLoading(false); }
+  }
 
   const timeline = useMemo(() => [
     ...lessons.map((lesson) => ({ type: "lesson" as const, date: lesson.classStudyDueDate, lesson })),
@@ -1593,11 +1653,11 @@ function LessonsPage({ currentClass, isAdmin, onClassRefresh }: { currentClass: 
   ].sort((a, b) => a.date.localeCompare(b.date)), [lessons, breaks]);
 
   return <main className="page">
-    <PageHeader eyebrow="SCHEDULE" title="课表安排" description="本周课次尚无考勤记录时，可以编辑、插入、暂停或重新生成；已有考勤和历史安排不会被覆盖。" actions={<>{lessons.length > 0 && <><button className="secondary" onClick={() => setShowBreak(true)}><CloudSun size={17} /> 放假 / 暂停周</button><button className="secondary" onClick={() => setShowInsert(true)} disabled={!lessons.some((lesson) => lesson.scheduleEditable)}><Plus size={17} /> 插入课次</button><button className="secondary" onClick={() => setShowRebuild(true)} disabled={!lessons.some((lesson) => lesson.scheduleEditable)}><RefreshCw size={17} /> 重新生成未登记课表</button></>}<button className="primary" onClick={() => setShowGenerate(true)}><CalendarDays size={17} /> {lessons.length ? "追加课次" : "生成课表"}</button></>} />
+    <PageHeader eyebrow="SCHEDULE" title="课表安排" description={isAdmin ? "管理员可调整全部课次，包括底层已锁定课次；已有考勤的删除或重建需要二次确认。锁定条件仍是“已有考勤且已过整课截止日”，截止日当天仍可调整。" : "仅“已有考勤且已过整课截止日”的课次锁定，截止日当天仍可调整；无考勤课次即使过期也可编辑或删除。"} actions={<>{lessons.length > 0 && <><button className="secondary" onClick={() => setShowBreak(true)}><CloudSun size={17} /> 放假 / 暂停周</button><button className="secondary" onClick={() => setShowInsert(true)} disabled={!adjustableSuffix.length} title={adjustableSuffix.length ? (isAdmin ? "管理员可从全课表插入" : "在最后一个已锁定课次之后插入") : "当前权限下没有可插入位置，请使用追加课次"}><Plus size={17} /> 插入课次</button><button className="secondary" onClick={() => setShowRebuild(true)} disabled={!adjustableSuffix.length} title={adjustableSuffix.length ? (isAdmin ? "管理员可重新生成全课表" : "重新生成最后一个已锁定课次之后的课表") : "没有可重新生成的课次"}><RefreshCw size={17} /> 重新生成可调整课表</button></>}<button className="primary" onClick={() => setShowGenerate(true)}><CalendarDays size={17} /> {lessons.length ? "追加课次" : "生成课表"}</button></>} />
     <Notice notice={notice} onClose={() => setNotice(null)} />
     {loading ? <Loading text="正在读取课表..." /> : timeline.length === 0 ? <EmptyState icon={<CalendarDays size={28} />} title="还没有课表" detail="请选择课程体系、起始课和第一课截止日，再生成学习课表。" action={<button className="primary" onClick={() => setShowGenerate(true)}>生成课表</button>} /> : <section className="panel schedule-panel">
       <div className="schedule-legend"><span><i className="dot current" /> 当前 / 近期</span><span><i className="dot future" /> 未开始</span><span><i className="dot review" /> 复习课</span><span><i className="dot break" /> 暂停周</span></div>
-      <div className="schedule-list">{timeline.map((entry) => entry.type === "break" ? <article className="schedule-break" key={`break-${entry.breakItem.id}`}><div className="timeline-node"><CloudSun size={17} /></div><div><strong>{entry.breakItem.title}</strong><span>{entry.breakItem.date} · 本周不考勤，后续课表已顺延</span></div></article> : <article className={`schedule-row ${entry.lesson.status ?? (entry.lesson.started ? "finished" : "future")}`} key={entry.lesson.id}><div className="timeline-node">{entry.lesson.lessonNumber}</div><div className="schedule-main"><div><strong>{entry.lesson.title}</strong><span className={`lesson-type ${entry.lesson.lessonType}`}>{entry.lesson.lessonType === "review" ? "复习课" : "普通课"}</span></div><small>第 {entry.lesson.lessonNumber} 个课次 · {entry.lesson.cadenceMode === "same_week" ? "同周完成" : "平行两周"}</small></div><div className="lesson-dates"><span><small>导图/提纲</small>{entry.lesson.lessonType === "review" ? "不需要" : entry.lesson.outlineDueDate}</span><span><small>组修</small>{entry.lesson.groupStudyDueDate}</span><span><small>班修</small>{entry.lesson.classStudyDueDate}</span></div><button className="icon-button" aria-label={entry.lesson.scheduleEditable ? `编辑第 ${entry.lesson.lessonNumber} 个课次` : `第 ${entry.lesson.lessonNumber} 个课次已有考勤，不可编辑`} onClick={() => setEditing(entry.lesson)} disabled={!entry.lesson.scheduleEditable} title={entry.lesson.scheduleEditable ? "编辑现有课次" : "已有考勤记录，不能修改课表"}><Pencil size={16} /></button></article>)}</div>
+      <div className="schedule-list">{timeline.map((entry) => entry.type === "break" ? <article className="schedule-break" key={`break-${entry.breakItem.id}`}><div className="timeline-node"><CloudSun size={17} /></div><div><strong>{entry.breakItem.title}</strong><span>{entry.breakItem.date} · 本周不考勤，后续课表已顺延；已有考勤随原课次保留</span></div></article> : <article className={`schedule-row ${entry.lesson.status ?? (entry.lesson.started ? "finished" : "future")}`} key={entry.lesson.id}><div className="timeline-node">{entry.lesson.lessonNumber}</div><div className="schedule-main"><div><strong>{entry.lesson.title}</strong><span className={`lesson-type ${entry.lesson.lessonType}`}>{entry.lesson.lessonType === "review" ? "复习课" : "普通课"}</span></div><small>第 {entry.lesson.lessonNumber} 个课次 · {entry.lesson.cadenceMode === "same_week" ? "同周完成" : "平行两周"}</small></div><div className="lesson-dates"><span><small>导图/提纲</small>{entry.lesson.lessonType === "review" ? "不需要" : entry.lesson.outlineDueDate}</span><span><small>组修</small>{entry.lesson.groupStudyDueDate}</span><span><small>班修</small>{entry.lesson.classStudyDueDate}</span></div><div className="row-actions"><button className="icon-button" aria-label={entry.lesson.scheduleEditable ? `编辑第 ${entry.lesson.lessonNumber} 个课次` : `第 ${entry.lesson.lessonNumber} 个课次已过截止日且有考勤，不可编辑`} onClick={() => setEditing(entry.lesson)} disabled={!entry.lesson.scheduleEditable} title={!entry.lesson.scheduleEditable ? "已有考勤且已过整课截止日，课表已锁定" : entry.lesson.scheduleLocked ? "底层已锁定；管理员可编辑课名或日期" : entry.lesson.hasRecordedAttendance ? "编辑课名或日期（已有考勤会保留）" : "编辑现有课次"}><Pencil size={16} /></button><button className="icon-button danger" aria-label={entry.lesson.scheduleEditable ? `删除第 ${entry.lesson.lessonNumber} 个课次` : `第 ${entry.lesson.lessonNumber} 个课次已过截止日且有考勤，不可删除`} onClick={() => void removeLesson(entry.lesson)} disabled={!entry.lesson.scheduleEditable} title={!entry.lesson.scheduleEditable ? "已有考勤且已过整课截止日，课表已锁定" : entry.lesson.scheduleLocked ? "底层已锁定；管理员可删除，删除会清空本课考勤" : entry.lesson.hasRecordedAttendance ? "删除课次并清空本课考勤" : "删除课次"}><Trash2 size={16} /></button></div></article>)}</div>
     </section>}
     {showGenerate && <GenerateSchedule classId={currentClass.id} defaultMode={currentClass.cadenceMode ?? "same_week"} hasLessons={lessons.length > 0} canSync={isAdmin} defaultSeriesKey={currentClass.courseSeriesKey} defaultRound={currentClass.courseRound} defaultStartPosition={currentClass.courseStartPosition} sourceProgress={currentClass.sourceProgress} onClose={() => setShowGenerate(false)} onSaved={reloadScheduleAndClass} />}
     {showRebuild && <RebuildFutureSchedule classId={currentClass.id} lessons={lessons} currentClass={currentClass} canSync={isAdmin} onClose={() => setShowRebuild(false)} onSaved={reloadScheduleAndClass} />}
