@@ -13,7 +13,7 @@ export type OutlineStatus = (typeof OUTLINE_STATUSES)[number];
 export const GROUP_STUDY_STATUSES = ["present", "absent"] as const;
 export type GroupStudyStatus = (typeof GROUP_STUDY_STATUSES)[number];
 
-export const CLASS_STUDY_STATUSES = ["onsite", "online", "makeup", "share", "absent"] as const;
+export const CLASS_STUDY_STATUSES = ["onsite", "online", "share", "absent"] as const;
 export type ClassStudyStatus = (typeof CLASS_STUDY_STATUSES)[number];
 export type AttendanceStatus = OutlineStatus | GroupStudyStatus | ClassStudyStatus;
 

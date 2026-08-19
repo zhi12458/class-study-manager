@@ -40,7 +40,7 @@ describe("普通学员手机号可选", () => {
       const columns = db.prepare("pragma table_info(persons)").all() as Array<{ name: string; notnull: number }>;
       expect(columns.find((column) => column.name === "phone")?.notnull).toBe(0);
       expect((db.prepare("select group_concat(version) as versions from schema_migrations").get() as { versions: string }).versions)
-        .toBe("1,2,3,4,5,6,7,8,9,10,11");
+        .toBe("1,2,3,4,5,6,7,8,9,10,11,12");
 
       const { classId, group } = await setupClass(admin);
       const first = await admin.post<{ studentId: number }>(`/classes/${classId}/students`, {

@@ -42,6 +42,7 @@ function runMigrations(db: DatabaseSync): void {
   if (!applied.has(9)) migrationNine(db);
   if (!applied.has(10)) migrationTen(db);
   if (!applied.has(11)) migrationEleven(db);
+  if (!applied.has(12)) migrationTwelve(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -498,6 +499,53 @@ function migrationEleven(db: DatabaseSync): void {
       create index system_audit_user_idx on system_audit_events(user_id, created_at desc);
       insert into schema_migrations (version) values (11);
     `);
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function migrationTwelve(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    const entryCount = Number((db.prepare(
+      "select count(*) as count from attendance_entries where metric = 'class_study' and status = 'makeup'",
+    ).get() as { count: number }).count);
+    const auditCount = Number((db.prepare(
+      "select count(*) as count from attendance_audit where previous_status = 'makeup' or new_status = 'makeup'",
+    ).get() as { count: number }).count);
+
+    db.exec(`
+      update attendance_entries
+         set status = 'absent'
+       where metric = 'class_study' and status = 'makeup';
+      update attendance_audit
+         set previous_status = case when previous_status = 'makeup' then 'absent' else previous_status end,
+             new_status = case when new_status = 'makeup' then 'absent' else new_status end
+       where previous_status = 'makeup' or new_status = 'makeup';
+
+      create trigger attendance_entries_reject_makeup_insert
+      before insert on attendance_entries
+      when new.status = 'makeup'
+      begin
+        select raise(abort, 'makeup attendance status has been retired');
+      end;
+      create trigger attendance_entries_reject_makeup_update
+      before update of status on attendance_entries
+      when new.status = 'makeup'
+      begin
+        select raise(abort, 'makeup attendance status has been retired');
+      end;
+    `);
+    if (entryCount > 0 || auditCount > 0) {
+      db.prepare(
+        `insert into system_audit_events
+           (event_type, outcome, details_json)
+         values ('attendance_makeup_retired', 'success', ?)`,
+      ).run(JSON.stringify({ convertedAttendanceEntries: entryCount, convertedAuditRows: auditCount }));
+    }
+    db.prepare("insert into schema_migrations (version) values (12)").run();
     db.exec("commit");
   } catch (error) {
     db.exec("rollback");

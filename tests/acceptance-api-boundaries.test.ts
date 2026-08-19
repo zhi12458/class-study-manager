@@ -70,6 +70,35 @@ async function addStudent(
 }
 
 describe("API 边界、事务与文件响应验收", () => {
+  it("班修不再接受补课状态，并可正常登记为缺勤", async () => {
+    await withApi(async ({ admin, adminId }) => {
+      const classId = await createClass(admin, adminId, "停用补课状态班", 1);
+      const groupId = (await groups(admin, classId))[0].id;
+      const studentId = await addStudent(admin, classId, groupId, "考勤状态学员", "13700000200");
+      expect((await admin.post(`/classes/${classId}/schedule/generate`, {
+        firstDueDate: shanghaiToday(),
+        count: 1,
+      })).status).toBe(200);
+      const lesson = (await admin.get<{ lessons: Array<{ id: number }> }>(
+        `/classes/${classId}/lessons`,
+      )).body.lessons[0];
+
+      const retired = await admin.put<{ error: string }>(`/classes/${classId}/attendance/${lesson.id}`, {
+        records: [{ studentId, classStudy: "makeup" }],
+      });
+      expect(retired.status).toBe(400);
+      expect(retired.body.error).toContain("考勤状态无效");
+
+      expect((await admin.put(`/classes/${classId}/attendance/${lesson.id}`, {
+        records: [{ studentId, classStudy: "absent" }],
+      })).status).toBe(200);
+      const attendance = await admin.get<{ rows: Array<{ studentId: number; classStudy: string }> }>(
+        `/classes/${classId}/attendance/${lesson.id}`,
+      );
+      expect(attendance.body.rows.find((row) => row.studentId === studentId)?.classStudy).toBe("absent");
+    });
+  });
+
   it("班长在整课截止日后第 14 天被 API 锁定，管理员仍可补改，第 13 天班长仍可填写", async () => {
     await withApi(async ({ db, admin, adminId }) => {
       const classId = await createClass(admin, adminId, "锁定边界班", 1);

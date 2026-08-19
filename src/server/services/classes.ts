@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { CadenceMode, LessonScheduleItem, LessonType } from "../../shared/types.js";
 import { coursePlanForRange } from "../../shared/courseCatalog.js";
 import { generateSchedule, insertBreak, shiftScheduleFrom } from "./schedule.js";
-import { freezeStartedLessons } from "./roster.js";
+import { freezeStartedLessons, shanghaiToday } from "./roster.js";
 
 const DAY_MS = 86_400_000;
 const DEFAULT_GROUP_NAMES = ["第一组", "第二组", "第三组", "第四组", "第五组"];
@@ -12,6 +12,13 @@ function addDays(date: string, days: number): string {
 }
 
 type StoredLesson = LessonScheduleItem & { id: number; frozenAt: string | null; coursePosition: number | null };
+type RosterSnapshotRow = {
+  enrollmentId: number;
+  studentName: string;
+  dharmaName: string | null;
+  groupId: number;
+  groupName: string;
+};
 
 function lessonRows(db: DatabaseSync, classId: number): StoredLesson[] {
   return db.prepare(
@@ -69,14 +76,85 @@ function applySavedBreaks(db: DatabaseSync, classId: number, lessons: LessonSche
 }
 
 function assertLessonsHaveNoAttendance(db: DatabaseSync, classId: number, fromSequence: number): void {
-  const row = db.prepare(
-    `select
-       (select count(*) from attendance_entries ae join lessons l on l.id = ae.lesson_id
-         where l.class_id = ? and l.sequence >= ?) as entries,
-       (select count(*) from attendance_audit aa join lessons l on l.id = aa.lesson_id
-         where l.class_id = ? and l.sequence >= ?) as audits`
-  ).get(classId, fromSequence, classId, fromSequence) as { entries: number; audits: number };
-  if (row.entries || row.audits) throw new Error("未来课次已有考勤记录，不能重新生成；请保留该课并逐课调整");
+  const lessonIds = db.prepare(
+    "select id from lessons where class_id = ? and sequence >= ? order by sequence"
+  ).all(classId, fromSequence) as Array<{ id: number }>;
+  if (lessonIds.some((lesson) => lessonHasRecordedAttendance(db, lesson.id))) {
+    throw new Error("待调整课次已有考勤记录，不能重新生成；请保留该课并逐课调整");
+  }
+}
+
+/**
+ * A frozen roster only means the lesson week has arrived. It is not evidence
+ * that a person has started entering attendance. Review lessons receive an
+ * automatic outline/not-required record when their roster freezes, so that
+ * system-generated value must not lock schedule editing by itself.
+ */
+export function lessonHasRecordedAttendance(db: DatabaseSync, lessonId: number): boolean {
+  const entry = db.prepare(
+    `select 1
+       from attendance_entries ae
+       join lessons l on l.id = ae.lesson_id
+      where ae.lesson_id = ?
+        and not (l.lesson_type = 'review' and ae.metric = 'outline' and ae.status = 'not_required')
+      limit 1`
+  ).get(lessonId);
+  if (entry) return true;
+  return Boolean(db.prepare(
+    `select 1
+       from attendance_audit aa
+       join lessons l on l.id = aa.lesson_id
+      where aa.lesson_id = ?
+        and not (
+          l.lesson_type = 'review' and aa.metric = 'outline'
+          and aa.previous_status is null and aa.new_status = 'not_required'
+        )
+      limit 1`
+  ).get(lessonId));
+}
+
+function resetUnattendedLessonRoster(db: DatabaseSync, lessonId: number): void {
+  if (lessonHasRecordedAttendance(db, lessonId)) throw new Error("本课已有考勤记录，不能修改课表");
+  db.prepare("delete from lesson_roster where lesson_id = ?").run(lessonId);
+  db.prepare("update lessons set roster_frozen_at = null where id = ?").run(lessonId);
+}
+
+function copyRosterSnapshotToLesson(
+  db: DatabaseSync,
+  lessonId: number,
+  lessonType: LessonType,
+  rows: readonly RosterSnapshotRow[],
+): void {
+  const insertRoster = db.prepare(
+    `insert into lesson_roster
+       (lesson_id, enrollment_id, student_name, dharma_name, group_id, group_name)
+     values (?, ?, ?, ?, ?, ?)`,
+  );
+  for (const row of rows) {
+    insertRoster.run(lessonId, row.enrollmentId, row.studentName, row.dharmaName, row.groupId, row.groupName);
+  }
+  if (lessonType === "review" && rows.length > 0) {
+    const actor = db.prepare("select id from users where is_admin = 1 order by id limit 1").get() as { id: number };
+    const insertAttendance = db.prepare(
+      `insert into attendance_entries
+         (lesson_id, lesson_roster_id, metric, status, modified_by)
+       values (?, ?, 'outline', 'not_required', ?)`,
+    );
+    const insertAudit = db.prepare(
+      `insert into attendance_audit
+         (lesson_id, lesson_roster_id, metric, previous_status, new_status, modified_by)
+       values (?, ?, 'outline', null, 'not_required', ?)`,
+    );
+    const rosterId = db.prepare(
+      "select id from lesson_roster where lesson_id = ? and enrollment_id = ?",
+    );
+    for (const row of rows) {
+      const roster = rosterId.get(lessonId, row.enrollmentId) as { id: number };
+      insertAttendance.run(lessonId, roster.id, actor.id);
+      insertAudit.run(lessonId, roster.id, actor.id);
+    }
+  }
+  db.prepare("update lessons set roster_frozen_at = current_timestamp where id = ?").run(lessonId);
 }
 
 function shiftSequenceBoundariesForInsertion(db: DatabaseSync, classId: number, fromSequence: number): void {
@@ -183,8 +261,11 @@ export function rebuildFutureSchedule(
   if (!Number.isInteger(input.count) || input.count < 1 || input.count > 100) throw new Error("课次数量必须为1至100");
   freezeStartedLessons(db, classId);
   const existing = lessonRows(db, classId);
-  const firstFutureIndex = existing.findIndex((lesson) => !lesson.frozenAt);
-  if (firstFutureIndex < 0) throw new Error("没有尚未开始的课次可以重新生成");
+  const today = shanghaiToday();
+  const firstFutureIndex = existing.findIndex(
+    (lesson) => lesson.classStudyDueDate >= today && !lessonHasRecordedAttendance(db, lesson.id)
+  );
+  if (firstFutureIndex < 0) throw new Error("没有当前或未来且尚无考勤的课次可以重新生成");
   const firstFutureSequence = existing[firstFutureIndex].sequence;
   assertLessonsHaveNoAttendance(db, classId, firstFutureSequence);
   const plan = catalogPlan(db, input.seriesKey, input.startPosition, input.count);
@@ -236,8 +317,17 @@ export function insertLesson(
   const existing = lessonRows(db, classId);
   const target = existing.find((lesson) => lesson.id === input.beforeLessonId);
   if (!target) throw new Error("插入位置不存在");
-  if (target.frozenAt) throw new Error("只能在尚未开始的课次之前插入");
+  if (target.classStudyDueDate < shanghaiToday()) throw new Error("只能在当前或未来课次之前插入");
+  const affectedLessons = existing.slice(existing.indexOf(target));
+  if (affectedLessons.some((lesson) => lessonHasRecordedAttendance(db, lesson.id))) {
+    throw new Error("插入位置或后续课次已有考勤记录，不能整体顺延");
+  }
   if (!input.title.trim()) throw new Error("课名不能为空");
+  const targetRoster = target.frozenAt ? db.prepare(
+    `select enrollment_id as enrollmentId, student_name as studentName, dharma_name as dharmaName,
+            group_id as groupId, group_name as groupName
+       from lesson_roster where lesson_id = ? order by id`,
+  ).all(target.id) as RosterSnapshotRow[] : [];
 
   let title = input.title.trim();
   let lessonType = input.lessonType;
@@ -267,6 +357,7 @@ export function insertLesson(
 
   db.exec("begin immediate");
   try {
+    for (const lesson of affectedLessons) if (lesson.frozenAt) resetUnattendedLessonRoster(db, lesson.id);
     shiftSequenceBoundariesForInsertion(db, classId, target.sequence);
     const inserted = rebuilt[0];
     const result = db.prepare(
@@ -276,6 +367,10 @@ export function insertLesson(
        values (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(classId, inserted.sequence, inserted.title, inserted.lessonType, inserted.cadenceMode,
       inserted.outlineDueDate, inserted.groupStudyDueDate, inserted.classStudyDueDate, coursePosition);
+    const insertedLessonId = Number(result.lastInsertRowid);
+    if (target.frozenAt && addDays(inserted.outlineDueDate, -6) <= shanghaiToday()) {
+      copyRosterSnapshotToLesson(db, insertedLessonId, inserted.lessonType, targetRoster);
+    }
     const update = db.prepare(
       `update lessons
           set outline_due_date = ?, group_study_due_date = ?, class_study_due_date = ?, updated_at = current_timestamp
@@ -286,7 +381,7 @@ export function insertLesson(
       update.run(scheduled.outlineDueDate, scheduled.groupStudyDueDate, scheduled.classStudyDueDate, lesson.id);
     });
     db.exec("commit");
-    return { lessonId: Number(result.lastInsertRowid), sequence: target.sequence };
+    return { lessonId: insertedLessonId, sequence: target.sequence };
   } catch (error) {
     db.exec("rollback");
     throw error;
@@ -375,16 +470,29 @@ export function patchLesson(db: DatabaseSync, classId: number, lessonId: number,
   const rows = lessonRows(db, classId);
   const target = rows.find((lesson) => lesson.id === lessonId);
   if (!target) throw new Error("课次不存在");
-  if (options.futureOnly && target.frozenAt) throw new Error("班长只能编辑尚未开始的课次");
-  if (target.frozenAt && (patch.lessonType || patch.classStudyDueDate)) throw new Error("已开始课次不能修改类型或日期");
+  const hasAttendance = lessonHasRecordedAttendance(db, target.id);
+  const lessonHasEnded = target.classStudyDueDate < shanghaiToday();
+  const changesType = patch.lessonType !== undefined && patch.lessonType !== target.lessonType;
+  const changesDate = patch.classStudyDueDate !== undefined && patch.classStudyDueDate !== target.classStudyDueDate;
+  if (options.futureOnly && (lessonHasEnded || hasAttendance)) throw new Error("班长只能修改当前或未来且尚无考勤的课次");
+  if (lessonHasEnded && (changesType || changesDate)) throw new Error("已结束课次不能修改类型或日期");
+  if (hasAttendance && (changesType || changesDate)) throw new Error("本课已有考勤记录，不能修改类型或日期");
+  const affectedByDateChange = changesDate ? rows.filter((lesson) => lesson.sequence >= target.sequence) : [];
+  if (affectedByDateChange.some((lesson) => lessonHasRecordedAttendance(db, lesson.id))) {
+    throw new Error("本课或后续课次已有考勤记录，不能整体顺延");
+  }
   db.exec("begin immediate");
   try {
+    const rostersToReset = new Set<number>();
+    if (changesType && target.frozenAt) rostersToReset.add(target.id);
+    for (const lesson of affectedByDateChange) if (lesson.frozenAt) rostersToReset.add(lesson.id);
+    for (const affectedLessonId of rostersToReset) resetUnattendedLessonRoster(db, affectedLessonId);
     if (patch.title !== undefined) {
       if (!patch.title.trim()) throw new Error("课名不能为空");
       db.prepare("update lessons set title = ?, updated_at = current_timestamp where id = ?").run(patch.title.trim(), lessonId);
     }
-    if (patch.lessonType) db.prepare("update lessons set lesson_type = ?, updated_at = current_timestamp where id = ?").run(patch.lessonType, lessonId);
-    if (patch.classStudyDueDate && patch.classStudyDueDate !== target.classStudyDueDate) {
+    if (changesType) db.prepare("update lessons set lesson_type = ?, updated_at = current_timestamp where id = ?").run(patch.lessonType!, lessonId);
+    if (changesDate) {
       const delta = Math.round((new Date(`${patch.classStudyDueDate}T00:00:00Z`).getTime() - new Date(`${target.classStudyDueDate}T00:00:00Z`).getTime()) / DAY_MS);
       const shifted = shiftScheduleFrom(rows, target.sequence, delta);
       const update = db.prepare(
@@ -393,7 +501,6 @@ export function patchLesson(db: DatabaseSync, classId: number, lessonId: number,
       );
       shifted.filter((lesson) => lesson.sequence >= target.sequence).forEach((lesson) => {
         const original = rows.find((row) => row.sequence === lesson.sequence)!;
-        if (original.frozenAt) throw new Error("不能移动已开始课次");
         update.run(lesson.outlineDueDate, lesson.groupStudyDueDate, lesson.classStudyDueDate, original.id);
       });
     }
@@ -404,16 +511,29 @@ export function patchLesson(db: DatabaseSync, classId: number, lessonId: number,
 export function addScheduleBreak(db: DatabaseSync, classId: number, startsOn: string, weeks: number, reason: string, userId: number): void {
   if (!Number.isInteger(weeks) || weeks < 1 || weeks > 52) throw new Error("暂停周数必须为1至52");
   freezeStartedLessons(db, classId);
-  let rows = lessonRows(db, classId);
-  if (rows.some((row) => row.frozenAt && row.classStudyDueDate >= startsOn)) throw new Error("不能移动已开始课次");
+  const originalRows = lessonRows(db, classId);
+  let rows = originalRows;
   for (let index = 0; index < weeks; index += 1) rows = insertBreak(rows, addDays(startsOn, index * 7), reason).lessons as typeof rows;
+  const changedLessons = rows.filter((lesson) => {
+    const original = originalRows.find((row) => row.id === lesson.id)!;
+    return lesson.outlineDueDate !== original.outlineDueDate
+      || lesson.groupStudyDueDate !== original.groupStudyDueDate
+      || lesson.classStudyDueDate !== original.classStudyDueDate;
+  });
+  if (changedLessons.some((lesson) => lessonHasRecordedAttendance(db, lesson.id))) {
+    throw new Error("暂停周影响的课次已有考勤记录，不能整体顺延");
+  }
   db.exec("begin immediate");
   try {
+    for (const lesson of changedLessons) {
+      const original = originalRows.find((row) => row.id === lesson.id)!;
+      if (original.frozenAt) resetUnattendedLessonRoster(db, lesson.id);
+    }
     const update = db.prepare(
       `update lessons set outline_due_date = ?, group_study_due_date = ?, class_study_due_date = ?, updated_at = current_timestamp where id = ?`
     );
     rows.forEach((lesson) => {
-      const original = lessonRows(db, classId).find((row) => row.sequence === lesson.sequence)!;
+      const original = originalRows.find((row) => row.sequence === lesson.sequence)!;
       update.run(lesson.outlineDueDate, lesson.groupStudyDueDate, lesson.classStudyDueDate, original.id);
     });
     db.prepare("insert into schedule_breaks (class_id, start_date, weeks, reason, created_by) values (?, ?, ?, ?, ?)").run(

@@ -326,7 +326,7 @@ describe.sequential("API lifecycle and class isolation", () => {
       { title: "班长不应修改的历史课名" },
     );
     expect(deniedStartedEdit.status).toBe(400);
-    expect(deniedStartedEdit.body.error).toContain("班长只能编辑尚未开始的课次");
+    expect(deniedStartedEdit.body.error).toContain("尚无考勤");
 
     expect((await monitor.patch(`/classes/${classId}/lessons/${futureLesson.id}`, {
       title: "班长编辑的未来课",

@@ -75,6 +75,8 @@ test("弹窗限制键盘焦点并在关闭后回到触发按钮", async ({ page 
 
 test("主要管理页面和考勤保存流程可操作", async ({ page }, testInfo) => {
   await navigate(page, "考勤登记");
+  await expect(page.getByRole("option", { name: "补课" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "补课" })).toHaveCount(0);
   const mobile = testInfo.project.name === "mobile";
   await page.getByRole("combobox", { name: "导图/提纲", exact: true }).selectOption(mobile ? "no" : "yes");
   await page.getByRole("combobox", { name: "组修", exact: true }).selectOption(mobile ? "absent" : "present");
@@ -89,8 +91,8 @@ test("主要管理页面和考勤保存流程可操作", async ({ page }, testIn
   await expect(page.getByText("考勤已保存，并记录了本次修改人和时间")).toBeVisible();
 
   await navigate(page, "课表安排");
-  await page.getByRole("button", { name: "重新生成未来课表" }).click();
-  await expect(page.getByRole("dialog", { name: "重新生成未来课表" })).toBeVisible();
+  await page.getByRole("button", { name: "重新生成未登记课表" }).click();
+  await expect(page.getByRole("dialog", { name: "重新生成未登记课表" })).toBeVisible();
   await page.keyboard.press("Escape");
 
   await navigate(page, "学员名单");
@@ -110,7 +112,7 @@ test("班长可管理未来课表但看不到其他班级管理入口", async ({
 
   await expect(page.getByRole("button", { name: "放假 / 暂停周" })).toBeVisible();
   await expect(page.getByRole("button", { name: "插入课次" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "重新生成未来课表" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "重新生成未登记课表" })).toBeVisible();
   await expect(page.getByRole("button", { name: "追加课次" })).toBeVisible();
 
   await page.getByRole("button", { name: "编辑第 3 个课次" }).click();
@@ -121,8 +123,8 @@ test("班长可管理未来课表但看不到其他班级管理入口", async ({
   expect((await saveResponse).status()).toBe(200);
   await expect(page.getByText("班长更新的未来课", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "重新生成未来课表" }).click();
-  const rebuild = page.getByRole("dialog", { name: "重新生成未来课表" });
+  await page.getByRole("button", { name: "重新生成未登记课表" }).click();
+  const rebuild = page.getByRole("dialog", { name: "重新生成未登记课表" });
   await expect(rebuild.getByRole("button", { name: "刷新目录" })).toHaveCount(0);
   await page.keyboard.press("Escape");
 });

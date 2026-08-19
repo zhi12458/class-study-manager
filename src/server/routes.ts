@@ -19,7 +19,7 @@ import {
   listClassAccesses, loadSessionUser, verifyPassword
 } from "./auth.js";
 import {
-  addScheduleBreak, appendLessons, createClass, insertLesson, patchLesson,
+  addScheduleBreak, appendLessons, createClass, insertLesson, lessonHasRecordedAttendance, patchLesson,
   rebuildFutureSchedule, setInitialSchedule, updateFutureCadence
 } from "./services/classes.js";
 import { classifyRosterRows, parseRosterWorkbook, type ImportRow } from "./services/importRoster.js";
@@ -101,7 +101,7 @@ function sendCsv(res: Response, filename: string, rows: Array<Record<string, unk
 const METRIC_NAMES: Record<string, string> = { outline: "导图/提纲", group_study: "组修", class_study: "班修" };
 const STATUS_NAMES: Record<string, string> = {
   yes: "是", no: "否", not_required: "不需要", present: "出勤", absent: "缺勤",
-  onsite: "现场", online: "网络", makeup: "补课", share: "分享"
+  onsite: "现场", online: "网络", share: "分享"
 };
 
 function buildCsvExportRows(report: ReturnType<typeof buildClassReport>): Array<Record<string, unknown>> {
@@ -1278,7 +1278,7 @@ export function createApiRouter(db: DatabaseSync) {
          from lessons where class_id = ? order by sequence`
     ).all(classId) as Array<Record<string, unknown>>).map((lesson) => {
       const start = addDays(String(lesson.outlineDueDate), -6); const final = String(lesson.classStudyDueDate);
-      return { ...lesson, started: start <= today, lockedForMonitor: isMonitorLocked(final, today),
+      return { ...lesson, started: start <= today, scheduleEditable: final >= today && !lessonHasRecordedAttendance(db, Number(lesson.id)), lockedForMonitor: isMonitorLocked(final, today),
         status: start > today ? "future" : final >= today ? "current" : "finished" };
     });
     const breaks = db.prepare("select id, start_date as date, start_date as startDate, weeks, reason from schedule_breaks where class_id = ? order by start_date").all(classId);

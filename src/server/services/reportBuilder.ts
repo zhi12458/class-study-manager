@@ -151,7 +151,7 @@ export function buildClassReport(
   const attention = [...byStudent.entries()].flatMap(([enrollmentId, records]) => {
     const risk = detectClassStudyRisk(records.map((row) => ({
       dueDate: String(row.dueDate), lessonSequence: Number(row.lessonSequence),
-      status: row.status == null ? null : String(row.status) as "onsite" | "online" | "makeup" | "share" | "absent"
+      status: row.status == null ? null : String(row.status) as "onsite" | "online" | "share" | "absent"
     })), today);
     return risk.needsAttention ? [{ enrollmentId, studentId: enrollmentId, name: String(records.at(-1)?.studentName),
       groupName: String(records.at(-1)?.groupName), reasons: risk.reasons }] : [];

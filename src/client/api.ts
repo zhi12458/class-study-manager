@@ -4,7 +4,7 @@ export type LessonType = "regular" | "review";
 export type Metric = "outline" | "group_study" | "class_study";
 export type OutlineStatus = "yes" | "no" | "not_required";
 export type GroupStudyStatus = "present" | "absent";
-export type ClassStudyStatus = "onsite" | "online" | "makeup" | "share" | "absent";
+export type ClassStudyStatus = "onsite" | "online" | "share" | "absent";
 export type ReportRange = "recent" | "month" | "three_months" | "history" | "custom";
 export type EnrollmentStatus = "normal" | "leave" | "withdrawn";
 export type EnrollmentRole = "monitor" | "attendance_assistant" | "group_leader" | "charity" | "dharma_light" | "communications" | "student";
@@ -126,6 +126,7 @@ export interface Lesson {
   groupStudyDueDate: string;
   classStudyDueDate: string;
   started?: boolean;
+  scheduleEditable?: boolean;
   lockedForMonitor?: boolean;
   status?: "future" | "current" | "finished";
 }

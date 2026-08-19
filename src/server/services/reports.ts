@@ -12,13 +12,13 @@ const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const ALLOWED_STATUSES: Record<Metric, readonly AttendanceStatus[]> = {
   outline: ["yes", "no", "not_required"],
   group_study: ["present", "absent"],
-  class_study: ["onsite", "online", "makeup", "share", "absent"],
+  class_study: ["onsite", "online", "share", "absent"],
 };
 
 const COMPLETED_STATUSES: Record<Metric, ReadonlySet<AttendanceStatus>> = {
   outline: new Set(["yes"]),
   group_study: new Set(["present"]),
-  class_study: new Set(["onsite", "online", "makeup"]),
+  class_study: new Set(["onsite", "online"]),
 };
 
 const INVALID_CLASS_STUDY_STATUSES = new Set<ClassStudyStatus>(["share", "absent"]);

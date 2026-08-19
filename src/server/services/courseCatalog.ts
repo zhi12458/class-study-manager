@@ -84,9 +84,12 @@ export function parseOfficialCourseTree(payload: unknown): CatalogSeries[] {
   const bachelor = roots.find((node) => node.id === 2);
   const practitioner = roots.find((node) => node.id === 3);
   const advanced = roots.find((node) => node.id === 4);
-  if (!bachelor || !practitioner || !advanced) throw new Error("官方课程目录结构不完整");
+  const sage = roots.find((node) => node.id === 5);
+  if (!bachelor || !practitioner || !advanced || !sage) throw new Error("官方课程目录结构不完整");
   const practitionerChild = (id: number) => practitioner.children?.find((node) => node.id === id);
   const advancedChild = (id: number) => advanced.children?.find((node) => node.id === id);
+  const sageChild = (id: number) => sage.children?.find((node) => node.id === id);
+  const sageIntroduction = sage.contentInfoList?.length ? { ...sage, children: [] } : undefined;
   const definitions: Array<[string, string, SourceNode | undefined]> = [
     ["wisdom_life", "智慧人生", bachelor],
     ["dharma_essentials", "佛法要领", practitionerChild(303)],
@@ -94,9 +97,21 @@ export function parseOfficialCourseTree(payload: unknown): CatalogSeries[] {
     ["hundred_dharmas", "百法明门论", practitionerChild(309)],
     ["meditation_treatise", "辩中边论·辩修对治品", practitionerChild(311)],
     ["bodhisattva_way", "入菩萨行论", advancedChild(402)],
-    ["bodhisattva_precepts", "瑜伽菩萨戒品", advancedChild(403)]
+    ["bodhisattva_precepts", "瑜伽菩萨戒品", advancedChild(403)],
+    ["sage_introduction", "智士晋级开示", sageIntroduction],
+    ["middle_way_treatise", "辩中边论", sageChild(502)],
+    ["consciousness_only_thirty", "唯识三十论", sageChild(503)],
+    ["heart_sutra_life_wisdom", "心经的人生智慧", sageChild(504)],
+    ["heart_sutra_meditation", "心经的禅观", sageChild(505)],
+    ["diamond_sutra", "金刚经", sageChild(506)],
+    ["samantabhadra_practice", "普贤行愿品的观修原理", sageChild(507)],
+    ["platform_sutra", "六祖坛经", sageChild(508)]
   ];
-  return definitions.flatMap(([key, name, node]) => node ? [series(key, name, node)] : []);
+  const missing = definitions
+    .filter(([, , node]) => !node || collect(node).length === 0)
+    .map(([, name]) => name);
+  if (missing.length > 0) throw new Error(`官方课程目录不完整，缺少：${missing.join("、")}`);
+  return definitions.map(([key, name, node]) => series(key, name, node!));
 }
 
 export function replaceCourseCatalog(db: DatabaseSync, catalog: CatalogSeries[]): void {

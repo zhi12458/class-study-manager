@@ -370,7 +370,7 @@ td strong { color: #253b55; }
 .segmented button { min-height: 31px; padding: 0 9px; color: #667a8c; background: #f4f7f9; border-color: #e0e8ee; border-radius: 8px; font-size: 11px; font-weight: 700; }
 .segmented button:hover:not(:disabled) { transform: none; background: #eaf3fa; }
 .segmented button.selected { color: #0873c9; background: #dff0fd; border-color: #8fcdf5; box-shadow: 0 2px 6px rgba(22,136,248,.12); }
-.segmented button.option-present.selected, .segmented button.option-onsite.selected, .segmented button.option-online.selected, .segmented button.option-makeup.selected, .segmented button.option-yes.selected { color: #087c56; background: #e0f6ee; border-color: #8ad8bd; }
+.segmented button.option-present.selected, .segmented button.option-onsite.selected, .segmented button.option-online.selected, .segmented button.option-yes.selected { color: #087c56; background: #e0f6ee; border-color: #8ad8bd; }
 .segmented button.option-absent.selected, .segmented button.option-no.selected { color: #bd3c4d; background: #fde9ec; border-color: #efa8b2; }
 .segmented button.option-share.selected { color: #bd751c; background: #fff0d9; border-color: #efc27e; }
 .not-needed { display: inline-flex; padding: 6px 9px; color: #758595; background: #edf2f5; border-radius: 8px; font-size: 11px; font-weight: 750; }

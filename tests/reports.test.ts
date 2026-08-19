@@ -41,14 +41,14 @@ describe("calculateMetricRate", () => {
       rate: 50,
     });
     expect(
-      calculateMetricRate("class_study", ["onsite", "online", "makeup", "share", "absent"]),
+      calculateMetricRate("class_study", ["onsite", "online", "share", "absent"]),
     ).toEqual({
       metric: "class_study",
-      completed: 3,
-      recorded: 5,
+      completed: 2,
+      recorded: 4,
       pending: 0,
       notRequired: 0,
-      rate: 60,
+      rate: 50,
     });
   });
 
