@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { CadenceMode, LessonScheduleItem, LessonType } from "../../shared/types.js";
 import { coursePlanForRange } from "../../shared/courseCatalog.js";
-import { generateSchedule, insertBreak, shiftScheduleFrom } from "./schedule.js";
+import { generateSchedule, insertBreak, removeBreak, shiftScheduleFrom } from "./schedule.js";
 import { freezeStartedLessons, shanghaiToday } from "./roster.js";
 
 const DAY_MS = 86_400_000;
@@ -12,6 +12,13 @@ function addDays(date: string, days: number): string {
 }
 
 type StoredLesson = LessonScheduleItem & { id: number; frozenAt: string | null; coursePosition: number | null };
+type StoredScheduleBreak = {
+  id: number;
+  startDate: string;
+  weeks: number;
+  reason: string;
+  appliedToSchedule: boolean;
+};
 type RosterSnapshotRow = {
   enrollmentId: number;
   studentName: string;
@@ -28,6 +35,15 @@ function lessonRows(db: DatabaseSync, classId: number): StoredLesson[] {
             course_position as coursePosition
        from lessons where class_id = ? order by sequence`
   ).all(classId) as unknown as StoredLesson[];
+}
+
+function scheduleBreakRows(db: DatabaseSync, classId: number): StoredScheduleBreak[] {
+  const rows = db.prepare(
+    `select id, start_date as startDate, weeks, reason,
+            applied_to_schedule as appliedToSchedule
+       from schedule_breaks where class_id = ? order by id`,
+  ).all(classId) as unknown as Array<Omit<StoredScheduleBreak, "appliedToSchedule"> & { appliedToSchedule: number }>;
+  return rows.map((row) => ({ ...row, appliedToSchedule: Boolean(row.appliedToSchedule) }));
 }
 
 function insertLessons(db: DatabaseSync, classId: number, lessons: LessonScheduleItem[], coursePositions?: number[]): void {
@@ -55,24 +71,81 @@ function catalogPlan(db: DatabaseSync, seriesKey: string, startPosition: number,
   };
 }
 
-function applySavedBreaks(db: DatabaseSync, classId: number, lessons: LessonScheduleItem[]): LessonScheduleItem[] {
-  if (!lessons.length) return lessons;
-  const savedBreaks = db.prepare(
-    `select start_date as startDate, weeks, reason
-       from schedule_breaks
-      where class_id = ?
-      order by start_date, id`
-  ).all(classId) as Array<{ startDate: string; weeks: number; reason: string }>;
-  let scheduled = lessons;
+interface AppliedBreakSchedule<T extends LessonScheduleItem> {
+  lessons: T[];
+  appliedBreakIds: Set<number>;
+}
+
+function scheduleDatesDiffer(
+  before: readonly LessonScheduleItem[],
+  after: readonly LessonScheduleItem[],
+): boolean {
+  return after.some((lesson, index) => {
+    const original = before[index];
+    return !original
+      || lesson.outlineDueDate !== original.outlineDueDate
+      || lesson.groupStudyDueDate !== original.groupStudyDueDate
+      || lesson.classStudyDueDate !== original.classStudyDueDate;
+  });
+}
+
+function applyBreakRows<T extends LessonScheduleItem>(
+  lessons: readonly T[],
+  savedBreaks: readonly StoredScheduleBreak[],
+): AppliedBreakSchedule<T> {
+  if (!lessons.length) return { lessons: [], appliedBreakIds: new Set() };
+  let scheduled = [...lessons];
+  const appliedBreakIds = new Set<number>();
   const firstStageStart = addDays(lessons[0].outlineDueDate, -6);
   for (const savedBreak of savedBreaks) {
+    let applied = false;
     for (let week = 0; week < savedBreak.weeks; week += 1) {
       const weekStart = addDays(savedBreak.startDate, week * 7);
       if (addDays(weekStart, 6) < firstStageStart) continue;
-      scheduled = insertBreak(scheduled, weekStart, savedBreak.reason).lessons;
+      const next = insertBreak(scheduled, weekStart, savedBreak.reason).lessons as T[];
+      if (scheduleDatesDiffer(scheduled, next)) applied = true;
+      scheduled = next;
     }
+    if (applied) appliedBreakIds.add(savedBreak.id);
   }
-  return scheduled;
+  return { lessons: scheduled, appliedBreakIds };
+}
+
+function applySavedBreaks(db: DatabaseSync, classId: number, lessons: LessonScheduleItem[]): AppliedBreakSchedule<LessonScheduleItem> {
+  return applyBreakRows(lessons, scheduleBreakRows(db, classId));
+}
+
+function breakCouldAffectLessons(savedBreak: StoredScheduleBreak, lessons: readonly LessonScheduleItem[]): boolean {
+  const firstShiftedDate = addDays(savedBreak.startDate, 7);
+  return lessons.some((lesson) => lesson.outlineDueDate >= firstShiftedDate
+    || lesson.groupStudyDueDate >= firstShiftedDate
+    || lesson.classStudyDueDate >= firstShiftedDate);
+}
+
+function reconcileBreakApplicationState(
+  db: DatabaseSync,
+  classId: number,
+  preservedLessons: readonly LessonScheduleItem[],
+  newlyAppliedBreakIds: ReadonlySet<number>,
+): void {
+  const update = db.prepare("update schedule_breaks set applied_to_schedule = ? where id = ? and class_id = ?");
+  for (const savedBreak of scheduleBreakRows(db, classId)) {
+    const stillAppliedToPreserved = savedBreak.appliedToSchedule
+      && breakCouldAffectLessons(savedBreak, preservedLessons);
+    update.run(newlyAppliedBreakIds.has(savedBreak.id) || stillAppliedToPreserved ? 1 : 0, savedBreak.id, classId);
+  }
+}
+
+function persistAppliedBreakStates(
+  db: DatabaseSync,
+  classId: number,
+  breaks: readonly StoredScheduleBreak[],
+  appliedBreakIds: ReadonlySet<number>,
+): void {
+  const update = db.prepare("update schedule_breaks set applied_to_schedule = ? where id = ? and class_id = ?");
+  for (const savedBreak of breaks) {
+    update.run(appliedBreakIds.has(savedBreak.id) ? 1 : 0, savedBreak.id, classId);
+  }
 }
 
 /**
@@ -401,10 +474,15 @@ export function appendLessons(db: DatabaseSync, classId: number, count = 24): nu
     firstFinalDueDate: nextDue, count: plan.titles.length, cadenceMode: cls.cadenceMode,
     startSequence: last.sequence + 1, titles: plan.titles, lessonTypes: plan.lessonTypes
   });
+  const scheduled = applySavedBreaks(db, classId, generated);
   db.exec("begin immediate");
-  try { insertLessons(db, classId, generated, plan.positions); db.exec("commit"); }
+  try {
+    insertLessons(db, classId, scheduled.lessons, plan.positions);
+    reconcileBreakApplicationState(db, classId, existing, scheduled.appliedBreakIds);
+    db.exec("commit");
+  }
   catch (error) { db.exec("rollback"); throw error; }
-  return generated.length;
+  return scheduled.lessons.length;
 }
 
 export function rebuildFutureSchedule(
@@ -455,7 +533,8 @@ export function rebuildFutureSchedule(
               updated_at = current_timestamp
         where id = ?`
     ).run(input.cadenceMode, input.seriesKey, input.round, input.startPosition, classId);
-    insertLessons(db, classId, generated, plan.positions);
+    insertLessons(db, classId, generated.lessons, plan.positions);
+    reconcileBreakApplicationState(db, classId, existing.slice(0, firstFutureIndex), generated.appliedBreakIds);
     db.exec("commit");
   } catch (error) {
     db.exec("rollback");
@@ -464,7 +543,7 @@ export function rebuildFutureSchedule(
   return {
     preservedCount: firstFutureIndex,
     replacedCount,
-    generatedCount: generated.length,
+    generatedCount: generated.lessons.length,
     firstFutureSequence,
     ...discardImpact,
   };
@@ -534,7 +613,7 @@ export function insertLesson(
       if (lesson.frozenAt && !lessonHasRecordedAttendance(db, lesson.id)) resetUnattendedLessonRoster(db, lesson.id);
     }
     shiftSequenceBoundariesForInsertion(db, classId, target.sequence);
-    const inserted = rebuilt[0];
+    const inserted = rebuilt.lessons[0];
     const result = db.prepare(
       `insert into lessons
          (class_id, sequence, title, lesson_type, cadence_mode, outline_due_date, group_study_due_date,
@@ -552,9 +631,10 @@ export function insertLesson(
         where id = ?`
     );
     existing.slice(existing.indexOf(target)).forEach((lesson, index) => {
-      const scheduled = rebuilt[index + 1];
+      const scheduled = rebuilt.lessons[index + 1];
       update.run(scheduled.outlineDueDate, scheduled.groupStudyDueDate, scheduled.classStudyDueDate, lesson.id);
     });
+    reconcileBreakApplicationState(db, classId, existing.slice(0, targetIndex), rebuilt.appliedBreakIds);
     db.exec("commit");
     return { lessonId: insertedLessonId, sequence: target.sequence };
   } catch (error) {
@@ -630,9 +710,10 @@ export function setInitialSchedule(
         "update classes set course_series_key = ?, course_round = ?, course_start_position = ?, updated_at = current_timestamp where id = ?"
       ).run(course.seriesKey, course.round, course.startPosition, classId);
     }
-    insertLessons(db, classId, generated, plan.positions);
+    insertLessons(db, classId, generated.lessons, plan.positions);
+    reconcileBreakApplicationState(db, classId, [], generated.appliedBreakIds);
     db.exec("commit");
-    return generated.length;
+    return generated.lessons.length;
   }
   catch (error) { db.exec("rollback"); throw error; }
 }
@@ -665,9 +746,10 @@ export function updateFutureCadence(
         `update lessons set cadence_mode = ?, outline_due_date = ?, group_study_due_date = ?,
           class_study_due_date = ?, updated_at = current_timestamp where id = ?`
       );
-      scheduled.forEach((lesson, index) => update.run(
+      scheduled.lessons.forEach((lesson, index) => update.run(
         lesson.cadenceMode, lesson.outlineDueDate, lesson.groupStudyDueDate, lesson.classStudyDueDate, future[index].id
       ));
+      reconcileBreakApplicationState(db, classId, rows.slice(0, firstFutureIndex), scheduled.appliedBreakIds);
     }
     if (manageTransaction) db.exec("commit");
   } catch (error) {
@@ -761,9 +843,167 @@ export function addScheduleBreak(
       const original = originalRows.find((row) => row.sequence === lesson.sequence)!;
       update.run(lesson.outlineDueDate, lesson.groupStudyDueDate, lesson.classStudyDueDate, original.id);
     });
-    db.prepare("insert into schedule_breaks (class_id, start_date, weeks, reason, created_by) values (?, ?, ?, ?, ?)").run(
-      classId, startsOn, weeks, reason.trim() || "放假/暂停", userId
+    db.prepare(
+      `insert into schedule_breaks
+         (class_id, start_date, weeks, reason, created_by, applied_to_schedule)
+       values (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      classId, startsOn, weeks, reason.trim() || "放假/暂停", userId, changedLessons.length > 0 ? 1 : 0
     );
     db.exec("commit");
   } catch (error) { db.exec("rollback"); throw error; }
+}
+
+export interface ScheduleBreakMutationResult {
+  affectedLessonCount: number;
+  lockedLessonCount: number;
+}
+
+function undoScheduleBreaks(
+  lessons: readonly StoredLesson[],
+  breaks: readonly StoredScheduleBreak[],
+): StoredLesson[] {
+  let scheduled = [...lessons];
+  for (const savedBreak of [...breaks].reverse()) {
+    if (!savedBreak.appliedToSchedule) continue;
+    for (let week = savedBreak.weeks - 1; week >= 0; week -= 1) {
+      scheduled = removeBreak(scheduled, addDays(savedBreak.startDate, week * 7)) as StoredLesson[];
+    }
+  }
+  return scheduled;
+}
+
+function applyScheduleBreaks(
+  lessons: readonly StoredLesson[],
+  breaks: readonly StoredScheduleBreak[],
+): AppliedBreakSchedule<StoredLesson> {
+  return applyBreakRows(lessons, breaks);
+}
+
+function assertBreakMutationAllowed(
+  db: DatabaseSync,
+  changedLessons: readonly StoredLesson[],
+  options: { allowLockedOverride?: boolean; confirmLockedImpact?: boolean },
+): StoredLesson[] {
+  const lockedLessons = changedLessons.filter((lesson) => lessonScheduleLocked(db, lesson));
+  if (lockedLessons.length > 0 && !options.allowLockedOverride) {
+    throw new Error(`暂停周调整会影响 ${lockedLessons.length} 个已有考勤的锁定课次，当前账号不能操作`);
+  }
+  if (lockedLessons.length > 0 && !options.confirmLockedImpact) {
+    throw new Error(`暂停周调整与 ${lockedLessons.length} 个已有考勤的锁定课次冲突，管理员确认后方可继续`);
+  }
+  return lockedLessons;
+}
+
+function persistBreakScheduleMutation(
+  db: DatabaseSync,
+  originalRows: readonly StoredLesson[],
+  scheduledRows: readonly StoredLesson[],
+  mutateBreak: () => void,
+): void {
+  const changedLessons = scheduledRows.filter((lesson) => {
+    const original = originalRows.find((row) => row.id === lesson.id)!;
+    return lesson.outlineDueDate !== original.outlineDueDate
+      || lesson.groupStudyDueDate !== original.groupStudyDueDate
+      || lesson.classStudyDueDate !== original.classStudyDueDate;
+  });
+  for (const lesson of changedLessons) {
+    const original = originalRows.find((row) => row.id === lesson.id)!;
+    if (original.frozenAt && !lessonHasRecordedAttendance(db, lesson.id)) resetUnattendedLessonRoster(db, lesson.id);
+  }
+  const update = db.prepare(
+    `update lessons set outline_due_date = ?, group_study_due_date = ?, class_study_due_date = ?,
+            updated_at = current_timestamp where id = ?`,
+  );
+  for (const lesson of changedLessons) {
+    update.run(lesson.outlineDueDate, lesson.groupStudyDueDate, lesson.classStudyDueDate, lesson.id);
+  }
+  mutateBreak();
+}
+
+export function updateScheduleBreak(
+  db: DatabaseSync,
+  classId: number,
+  breakId: number,
+  input: { startsOn: string; weeks: number; reason: string },
+  options: { allowLockedOverride?: boolean; confirmLockedImpact?: boolean } = {},
+): ScheduleBreakMutationResult {
+  if (!Number.isInteger(input.weeks) || input.weeks < 1 || input.weeks > 52) throw new Error("暂停周数必须为1至52");
+  if (!input.reason.trim()) throw new Error("暂停周名称不能为空");
+  freezeStartedLessons(db, classId);
+  const originalRows = lessonRows(db, classId);
+  const breaks = scheduleBreakRows(db, classId);
+  const breakIndex = breaks.findIndex((item) => item.id === breakId);
+  if (breakIndex < 0) throw new Error("暂停周不存在");
+  const currentBreak = breaks[breakIndex];
+  const nextBreak = { ...currentBreak, startDate: input.startsOn, weeks: input.weeks, reason: input.reason.trim() };
+  const scheduleChanged = currentBreak.startDate !== nextBreak.startDate || currentBreak.weeks !== nextBreak.weeks;
+  const reappliedBreaks = [nextBreak, ...breaks.slice(breakIndex + 1)];
+  const reappliedSchedule = scheduleChanged
+    ? applyScheduleBreaks(undoScheduleBreaks(originalRows, breaks.slice(breakIndex)), reappliedBreaks)
+    : { lessons: [...originalRows], appliedBreakIds: new Set<number>() };
+  const scheduledRows = reappliedSchedule.lessons;
+  const changedLessons = scheduledRows.filter((lesson) => {
+    const original = originalRows.find((row) => row.id === lesson.id)!;
+    return lesson.outlineDueDate !== original.outlineDueDate
+      || lesson.groupStudyDueDate !== original.groupStudyDueDate
+      || lesson.classStudyDueDate !== original.classStudyDueDate;
+  });
+  const changedOriginalLessons = originalRows.filter((lesson) => changedLessons.some((changed) => changed.id === lesson.id));
+  const lockedLessons = assertBreakMutationAllowed(db, changedOriginalLessons, options);
+
+  db.exec("begin immediate");
+  try {
+    persistBreakScheduleMutation(db, originalRows, scheduledRows, () => {
+      db.prepare(
+        `update schedule_breaks
+            set start_date = ?, weeks = ?, reason = ?,
+                applied_to_schedule = case when ? then ? else applied_to_schedule end
+          where id = ? and class_id = ?`,
+      ).run(nextBreak.startDate, nextBreak.weeks, nextBreak.reason,
+        scheduleChanged ? 1 : 0, reappliedSchedule.appliedBreakIds.has(nextBreak.id) ? 1 : 0, breakId, classId);
+      if (scheduleChanged) {
+        persistAppliedBreakStates(db, classId, breaks.slice(breakIndex + 1), reappliedSchedule.appliedBreakIds);
+      }
+    });
+    db.exec("commit");
+  } catch (error) { db.exec("rollback"); throw error; }
+  return { affectedLessonCount: changedLessons.length, lockedLessonCount: lockedLessons.length };
+}
+
+export function deleteScheduleBreak(
+  db: DatabaseSync,
+  classId: number,
+  breakId: number,
+  options: { allowLockedOverride?: boolean; confirmLockedImpact?: boolean } = {},
+): ScheduleBreakMutationResult {
+  freezeStartedLessons(db, classId);
+  const originalRows = lessonRows(db, classId);
+  const breaks = scheduleBreakRows(db, classId);
+  const breakIndex = breaks.findIndex((item) => item.id === breakId);
+  if (breakIndex < 0) throw new Error("暂停周不存在");
+  const laterBreaks = breaks.slice(breakIndex + 1);
+  const reappliedSchedule = applyScheduleBreaks(
+    undoScheduleBreaks(originalRows, breaks.slice(breakIndex)),
+    laterBreaks,
+  );
+  const scheduledRows = reappliedSchedule.lessons;
+  const changedLessons = scheduledRows.filter((lesson) => {
+    const original = originalRows.find((row) => row.id === lesson.id)!;
+    return lesson.outlineDueDate !== original.outlineDueDate
+      || lesson.groupStudyDueDate !== original.groupStudyDueDate
+      || lesson.classStudyDueDate !== original.classStudyDueDate;
+  });
+  const changedOriginalLessons = originalRows.filter((lesson) => changedLessons.some((changed) => changed.id === lesson.id));
+  const lockedLessons = assertBreakMutationAllowed(db, changedOriginalLessons, options);
+
+  db.exec("begin immediate");
+  try {
+    persistBreakScheduleMutation(db, originalRows, scheduledRows, () => {
+      persistAppliedBreakStates(db, classId, laterBreaks, reappliedSchedule.appliedBreakIds);
+      db.prepare("delete from schedule_breaks where id = ? and class_id = ?").run(breakId, classId);
+    });
+    db.exec("commit");
+  } catch (error) { db.exec("rollback"); throw error; }
+  return { affectedLessonCount: changedLessons.length, lockedLessonCount: lockedLessons.length };
 }

@@ -19,15 +19,15 @@ import {
   listClassAccesses, loadSessionUser, verifyPassword
 } from "./auth.js";
 import {
-  addScheduleBreak, appendLessons, createClass, deleteLesson, insertLesson, lessonHasRecordedAttendance,
+  addScheduleBreak, appendLessons, createClass, deleteLesson, deleteScheduleBreak, insertLesson, lessonHasRecordedAttendance,
   lessonScheduleLocked, patchLesson,
-  rebuildFutureSchedule, setInitialSchedule, updateFutureCadence
+  rebuildFutureSchedule, setInitialSchedule, updateFutureCadence, updateScheduleBreak
 } from "./services/classes.js";
 import { classifyRosterRows, parseRosterWorkbook, type ImportRow } from "./services/importRoster.js";
 import { buildClassReport, type CustomReportRange } from "./services/reportBuilder.js";
 import {
   assertPersonAvailableForEnrollment, freezeLessonRoster, getNextEffectiveSequence,
-  freezeStartedLessons, lessonStartDate, setEnrollmentGroupFromSequence, setEnrollmentStatusFromSequence, shanghaiToday
+  freezeStartedLessons, lessonStartDate, listLessonRosterPreview, setEnrollmentGroupFromSequence, setEnrollmentStatusFromSequence, shanghaiToday
 } from "./services/roster.js";
 import { isMonitorLocked } from "./services/schedule.js";
 import { listCourseCatalog, syncOfficialCourseCatalog } from "./services/courseCatalog.js";
@@ -1380,6 +1380,26 @@ export function createApiRouter(db: DatabaseSync) {
     res.json({ ok: true });
   });
 
+  router.patch("/classes/:classId/breaks/:breakId", requireAuth, requireClassScheduleAccess(db), (req: AuthedRequest, res) => {
+    const result = updateScheduleBreak(db, numberParam(req.params.classId), numberParam(req.params.breakId, "暂停周"), {
+      startsOn: validDate(req.body.startDate ?? req.body.date),
+      weeks: Number(req.body.weeks ?? 1),
+      reason: String(req.body.reason ?? req.body.title ?? "放假/暂停"),
+    }, {
+      allowLockedOverride: req.user!.isAdmin,
+      confirmLockedImpact: req.body.confirmLockedImpact === true,
+    });
+    res.json(result);
+  });
+
+  router.delete("/classes/:classId/breaks/:breakId", requireAuth, requireClassScheduleAccess(db), (req: AuthedRequest, res) => {
+    const result = deleteScheduleBreak(db, numberParam(req.params.classId), numberParam(req.params.breakId, "暂停周"), {
+      allowLockedOverride: req.user!.isAdmin,
+      confirmLockedImpact: req.body?.confirmLockedImpact === true || req.query.confirmLockedImpact === "true",
+    });
+    res.json(result);
+  });
+
   router.get("/classes/:classId/breaks", requireAuth, requireClassAccess(db), (req, res) => {
     const breaks = db.prepare(
       `select id, start_date as date, start_date as startDate, weeks, reason, reason as title
@@ -1536,8 +1556,9 @@ export function createApiRouter(db: DatabaseSync) {
     const classId = numberParam(req.params.classId); const lessonId = numberParam(req.params.lessonId); const today = shanghaiToday();
     const lesson = getLesson(db, classId, lessonId); if (!lesson) return void res.status(404).json({ error: "课次不存在" });
     const courseStart = addDays(String(lesson.outlineDueDate), -6);
-    if (courseStart <= today) freezeLessonRoster(db, lessonId);
-    const rows = db.prepare(
+    const previewOnly = courseStart > today;
+    if (!previewOnly) freezeLessonRoster(db, lessonId);
+    let rows = db.prepare(
       `select lr.id as rosterId, lr.enrollment_id as studentId, lr.student_name as name, lr.dharma_name as dharmaName,
               lr.group_id as groupId, lr.group_name as groupName,
               ao.status as outline, ag.status as groupStudy, ac.status as classStudy,
@@ -1558,7 +1579,22 @@ export function createApiRouter(db: DatabaseSync) {
          left join users ug on ug.id = ag.modified_by
          left join users uc on uc.id = ac.modified_by
         where lr.lesson_id = ? order by lr.group_id, lr.student_name`
-    ).all(lessonId);
+    ).all(lessonId) as Array<Record<string, unknown>>;
+    if (previewOnly && rows.length === 0) {
+      rows = listLessonRosterPreview(db, classId, Number(lesson.sequence)).map((row) => ({
+        rosterId: null,
+        studentId: row.enrollmentId,
+        name: row.name,
+        dharmaName: row.dharmaName,
+        groupId: row.groupId,
+        groupName: row.groupName,
+        outline: null,
+        groupStudy: null,
+        classStudy: null,
+        updatedAt: null,
+        updatedBy: null,
+      }));
+    }
     const history = db.prepare(
       `select aa.id, lr.enrollment_id as studentId, lr.student_name as name,
               aa.metric, aa.previous_status as previousStatus, aa.new_status as newStatus,
@@ -1576,7 +1612,8 @@ export function createApiRouter(db: DatabaseSync) {
       class_study: addDays(String(lesson.classStudyDueDate), -6) <= today
     };
     const canEdit = courseStart <= today && (req.classPermission === "counselor" || !locked);
-    res.json({ attendanceSchemaVersion: ATTENDANCE_SCHEMA_VERSION, lesson: { ...lesson, lockedForMonitor: locked }, rows, records: rows, history, canEdit, lockedForMonitor: locked, openMetrics,
+    res.json({ attendanceSchemaVersion: ATTENDANCE_SCHEMA_VERSION, previewOnly, attendanceOpensOn: courseStart,
+      lesson: { ...lesson, lockedForMonitor: locked }, rows, records: rows, history, canEdit, lockedForMonitor: locked, openMetrics,
       statuses: { outline: OUTLINE_STATUSES, groupStudy: GROUP_STUDY_STATUSES, classStudy: CLASS_STUDY_STATUSES } });
   });
 

@@ -95,6 +95,13 @@ test("主要管理页面和考勤保存流程可操作", async ({ page }, testIn
   expect((await saveResponse).status()).toBe(200);
   await expect(page.getByText("考勤已保存，并记录了本次修改人和时间")).toBeVisible();
 
+  await page.getByRole("combobox", { name: "选择课次" }).selectOption({ index: 2 });
+  await expect(page.getByText(/本课尚未开始，将于 \d{4}-\d{2}-\d{2} 开放考勤/)).toBeVisible();
+  await expect(page.getByText("您没有编辑本课考勤的权限。")).toHaveCount(0);
+  await expect(page.getByText("测试学员", { exact: true }).filter({ visible: true }).first()).toBeVisible();
+  await expect(page.getByLabel("测试学员的组修").filter({ visible: true }).getByRole("button", { name: "现场" })).toBeDisabled();
+  await expect(saveAttendance).toBeDisabled();
+
   await navigate(page, "课表安排");
   await expect(page.getByText(/截止日当天仍可调整/)).toBeVisible();
   const lockedLessonEdit = page.getByRole("button", { name: "编辑第 1 个课次" });
@@ -104,6 +111,26 @@ test("主要管理页面和考勤保存流程可操作", async ({ page }, testIn
   const rebuildDialog = page.getByRole("dialog", { name: "重新生成可调整课表" });
   await expect(rebuildDialog).toBeVisible();
   await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: "放假 / 暂停周" }).click();
+  const addBreakDialog = page.getByRole("dialog", { name: "插入放假 / 暂停周" });
+  await addBreakDialog.getByLabel("暂停周日期").fill("2099-12-01");
+  await addBreakDialog.getByLabel("说明").fill("E2E暂停周");
+  const addBreakResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().includes("/breaks"));
+  await addBreakDialog.getByRole("button", { name: "插入并顺延" }).click();
+  expect((await addBreakResponse).status()).toBe(200);
+  await page.getByRole("button", { name: "修改E2E暂停周" }).click();
+  const editBreakDialog = page.getByRole("dialog", { name: "修改放假 / 暂停周" });
+  await editBreakDialog.getByLabel("说明").fill("E2E暂停周已修改");
+  const editBreakResponse = page.waitForResponse((response) => response.request().method() === "PATCH" && response.url().includes("/breaks/"));
+  await editBreakDialog.getByRole("button", { name: "保存并重算课表" }).click();
+  expect((await editBreakResponse).status()).toBe(200);
+  await expect(page.getByText("E2E暂停周已修改", { exact: true })).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  const deleteBreakResponse = page.waitForResponse((response) => response.request().method() === "DELETE" && response.url().includes("/breaks/"));
+  await page.getByRole("button", { name: "删除E2E暂停周已修改" }).click();
+  expect((await deleteBreakResponse).status()).toBe(200);
+  await expect(page.getByText("E2E暂停周已修改", { exact: true })).toHaveCount(0);
 
   await navigate(page, "学员名单");
   await expect(page.getByRole("button", { name: "Excel 导入" })).toBeVisible();

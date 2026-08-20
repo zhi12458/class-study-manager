@@ -316,11 +316,11 @@ td strong { color: #253b55; }
 .schedule-list { padding: 10px 22px 20px; }
 .schedule-row, .schedule-break { position: relative; min-height: 76px; margin-left: 19px; padding: 12px 0 12px 35px; display: grid; align-items: center; gap: 14px; border-left: 2px solid #dce8f1; }
 .schedule-row { grid-template-columns: minmax(190px, .9fr) minmax(390px, 1.5fr) auto; }
-.schedule-break { grid-template-columns: 1fr; color: #996217; }
+.schedule-break { grid-template-columns: minmax(0, 1fr) auto; color: #996217; }
 .timeline-node { position: absolute; left: -18px; width: 34px; height: 34px; display: grid; place-items: center; color: #668097; background: #f0f5f8; border: 4px solid #fff; border-radius: 50%; box-shadow: 0 0 0 1px #d6e4ee; font-size: 11px; font-weight: 850; }
 .schedule-row.current .timeline-node { color: #fff; background: var(--sky-500); box-shadow: 0 0 0 2px #bce2ff; }
 .schedule-break .timeline-node { color: #bd7820; background: #fff1da; }
-.schedule-break div:last-child { display: grid; gap: 3px; }
+.schedule-break-main { display: grid; gap: 3px; }
 .schedule-break span { color: #9a7850; font-size: 12px; }
 .schedule-main { display: grid; gap: 6px; }
 .schedule-main > div { display: flex; align-items: center; gap: 8px; }
@@ -491,7 +491,7 @@ td strong { color: #253b55; }
   .schedule-list { padding: 8px 13px 17px; }
   .schedule-row { margin-left: 15px; padding: 16px 0 16px 30px; grid-template-columns: 1fr auto; align-items: start; }
   .schedule-row .lesson-dates { grid-column: 1 / -1; grid-template-columns: repeat(3,minmax(0,1fr)); padding: 9px; background: #f7fafc; border-radius: 9px; }
-  .schedule-break { margin-left: 15px; padding-left: 30px; }
+  .schedule-break { margin-left: 15px; padding-left: 30px; grid-template-columns: minmax(0, 1fr) auto; }
   .timeline-node { left: -17px; width: 32px; height: 32px; }
   .lesson-picker { min-width: 0; width: 100%; }
   .lesson-summary-bar { align-items: stretch; flex-direction: column; }

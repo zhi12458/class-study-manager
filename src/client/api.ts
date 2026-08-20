@@ -137,6 +137,7 @@ export interface Lesson {
 export interface BreakWeek {
   id: number;
   date: string;
+  weeks: number;
   title?: string;
   reason?: string;
 }
@@ -156,6 +157,8 @@ export interface AttendanceRow {
 
 export interface AttendancePayload {
   attendanceSchemaVersion: number;
+  previewOnly?: boolean;
+  attendanceOpensOn?: string;
   lesson: Lesson;
   rows: AttendanceRow[];
   canEdit: boolean;

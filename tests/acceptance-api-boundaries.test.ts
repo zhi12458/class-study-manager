@@ -129,6 +129,58 @@ describe("API 边界、事务与文件响应验收", () => {
     });
   });
 
+  it("未开始课次返回预计名单但不冻结名单或允许保存", async () => {
+    await withApi(async ({ db, admin, adminId }) => {
+      const classId = await createClass(admin, adminId, "未来考勤预览班", 1);
+      const groupId = (await groups(admin, classId))[0].id;
+      const studentId = await addStudent(admin, classId, groupId, "预计名单学员", "13700000209");
+      const firstDueDate = addDays(shanghaiToday(), 14);
+      expect((await admin.post(`/classes/${classId}/schedule/generate`, {
+        firstDueDate,
+        count: 1,
+      })).status).toBe(200);
+      const lesson = (await admin.get<{ lessons: Array<{ id: number }> }>(
+        `/classes/${classId}/lessons`,
+      )).body.lessons[0];
+
+      const attendance = await admin.get<{
+        previewOnly: boolean;
+        attendanceOpensOn: string;
+        canEdit: boolean;
+        history: unknown[];
+        rows: Array<{ studentId: number; name: string; outline: null; groupStudy: null; classStudy: null }>;
+      }>(`/classes/${classId}/attendance/${lesson.id}`);
+      expect(attendance.status).toBe(200);
+      expect(attendance.body).toMatchObject({
+        previewOnly: true,
+        attendanceOpensOn: addDays(firstDueDate, -6),
+        canEdit: false,
+        history: [],
+      });
+      expect(attendance.body.rows).toEqual([
+        expect.objectContaining({
+          studentId,
+          name: "预计名单学员",
+          outline: null,
+          groupStudy: null,
+          classStudy: null,
+        }),
+      ]);
+      expect(db.prepare(
+        "select roster_frozen_at as frozenAt from lessons where id = ?",
+      ).get(lesson.id)).toEqual({ frozenAt: null });
+      expect(db.prepare(
+        "select count(*) as count from lesson_roster where lesson_id = ?",
+      ).get(lesson.id)).toEqual({ count: 0 });
+
+      const rejected = await admin.put<{ error: string }>(`/classes/${classId}/attendance/${lesson.id}`, {
+        records: [{ studentId, groupStudy: "onsite" }],
+      });
+      expect(rejected.status).toBe(400);
+      expect(rejected.body.error).toContain("该课尚未开始");
+    });
+  });
+
   it("班长在整课截止日后第 14 天被 API 锁定，管理员仍可补改，第 13 天班长仍可填写", async () => {
     await withApi(async ({ db, admin, adminId }) => {
       const classId = await createClass(admin, adminId, "锁定边界班", 1);

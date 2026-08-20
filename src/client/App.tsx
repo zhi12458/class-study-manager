@@ -51,6 +51,7 @@ import {
   type AttendanceAssistant,
   type AttendancePayload,
   type AttendanceRow,
+  type BreakWeek,
   type CadenceMode,
   type ClassStudyStatus,
   type ClassSummary,
@@ -1602,9 +1603,55 @@ function AddBreak({ classId, onClose, onSaved }: { classId: number; onClose: () 
   </Modal>;
 }
 
+function EditBreak({ classId, breakItem, isAdmin, onClose, onSaved }: {
+  classId: number;
+  breakItem: BreakWeek;
+  isAdmin: boolean;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [date, setDate] = useState(breakItem.date);
+  const [title, setTitle] = useState(breakItem.title ?? breakItem.reason ?? "放假 / 暂停");
+  const [weeks, setWeeks] = useState(breakItem.weeks);
+  const [notice, setNotice] = useState<NoticeState>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function save(confirmLockedImpact = false) {
+    return apiJson(`/api/classes/${classId}/breaks/${breakItem.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ date, weeks, reason: title, confirmLockedImpact })
+    });
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setLoading(true); setNotice(null);
+    try {
+      try {
+        await save();
+      } catch (error) {
+        const message = errorText(error);
+        if (!isAdmin || !message.includes("管理员确认后")) throw error;
+        if (!window.confirm(`${message}\n\n继续修改会调整已有考勤课次的日期，但不会删除考勤记录。是否确认继续？`)) return;
+        await save(true);
+      }
+      await onSaved(); onClose();
+    } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
+    finally { setLoading(false); }
+  }
+
+  return <Modal title="修改放假 / 暂停周" subtitle="修改日期或周数后，系统会先撤销原顺延，再按新安排重算后续课表；考勤记录不会被删除。" onClose={onClose}>
+    <form className="form-stack" onSubmit={submit}>
+      <div className="form-grid two"><label>暂停开始日期<input type="date" value={date} onChange={(event) => setDate(event.target.value)} required /></label><label>暂停周数<input type="number" min={1} max={52} value={weeks} onChange={(event) => setWeeks(Number(event.target.value))} required /></label></div>
+      <label>说明<input value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
+      <Notice notice={notice} />
+      <div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>取消</button><button className="primary" disabled={loading}>{loading ? "保存中..." : "保存并重算课表"}</button></div>
+    </form>
+  </Modal>;
+}
+
 function LessonsPage({ currentClass, isAdmin, onClassRefresh }: { currentClass: ClassSummary; isAdmin: boolean; onClassRefresh: () => Promise<void> }) {
   const [lessons, setLessons] = useState<Lesson[]>([]);
-  const [breaks, setBreaks] = useState<Array<{ id: number; date: string; title: string }>>([]);
+  const [breaks, setBreaks] = useState<BreakWeek[]>([]);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<NoticeState>(null);
   const [showGenerate, setShowGenerate] = useState(false);
@@ -1612,6 +1659,7 @@ function LessonsPage({ currentClass, isAdmin, onClassRefresh }: { currentClass: 
   const [showInsert, setShowInsert] = useState(false);
   const [showBreak, setShowBreak] = useState(false);
   const [editing, setEditing] = useState<Lesson | null>(null);
+  const [editingBreak, setEditingBreak] = useState<BreakWeek | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1621,7 +1669,7 @@ function LessonsPage({ currentClass, isAdmin, onClassRefresh }: { currentClass: 
         apiJson<unknown>(`/api/classes/${currentClass.id}/breaks`).catch(() => ({ breaks: [] }))
       ]);
       setLessons(asList<Record<string, unknown>>(lessonData, "lessons", "items").map(lessonFromRaw));
-      setBreaks(asList<Record<string, unknown>>(breakData, "breaks", "items").map((item) => ({ id: Number(item.id), date: dateOnly(item.date), title: String(item.title ?? item.reason ?? "放假 / 暂停") })));
+      setBreaks(asList<Record<string, unknown>>(breakData, "breaks", "items").map((item) => ({ id: Number(item.id), date: dateOnly(item.date), weeks: Number(item.weeks ?? 1), title: String(item.title ?? item.reason ?? "放假 / 暂停") })));
     } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
     finally { setLoading(false); }
   }, [currentClass.id]);
@@ -1652,6 +1700,28 @@ function LessonsPage({ currentClass, isAdmin, onClassRefresh }: { currentClass: 
     finally { setLoading(false); }
   }
 
+  async function removeBreak(breakItem: BreakWeek) {
+    if (!window.confirm(`确定删除“${breakItem.title ?? "放假 / 暂停"}”（${breakItem.date}）吗？\n\n删除后，本次暂停造成的顺延会撤销，后续课次日期将相应提前；已有考勤记录不会被删除。`)) return;
+    setLoading(true); setNotice(null);
+    const remove = (confirmLockedImpact = false) => apiJson(`/api/classes/${currentClass.id}/breaks/${breakItem.id}`, {
+      method: "DELETE",
+      body: JSON.stringify({ confirmLockedImpact })
+    });
+    try {
+      try {
+        await remove();
+      } catch (error) {
+        const message = errorText(error);
+        if (!isAdmin || !message.includes("管理员确认后")) throw error;
+        if (!window.confirm(`${message}\n\n继续删除会调整已有考勤课次的日期，但不会删除考勤记录。是否确认继续？`)) return;
+        await remove(true);
+      }
+      setNotice({ tone: "success", text: `已删除“${breakItem.title ?? "放假 / 暂停"}”，后续课表已重新计算` });
+      await reloadScheduleAndClass();
+    } catch (error) { setNotice({ tone: "error", text: errorText(error) }); }
+    finally { setLoading(false); }
+  }
+
   const timeline = useMemo(() => [
     ...lessons.map((lesson) => ({ type: "lesson" as const, date: lesson.classStudyDueDate, lesson })),
     ...breaks.map((item) => ({ type: "break" as const, date: item.date, breakItem: item }))
@@ -1662,12 +1732,13 @@ function LessonsPage({ currentClass, isAdmin, onClassRefresh }: { currentClass: 
     <Notice notice={notice} onClose={() => setNotice(null)} />
     {loading ? <Loading text="正在读取课表..." /> : timeline.length === 0 ? <EmptyState icon={<CalendarDays size={28} />} title="还没有课表" detail="请选择课程体系、起始课和第一课截止日，再生成学习课表。" action={<button className="primary" onClick={() => setShowGenerate(true)}>生成课表</button>} /> : <section className="panel schedule-panel">
       <div className="schedule-legend"><span><i className="dot current" /> 当前 / 近期</span><span><i className="dot future" /> 未开始</span><span><i className="dot review" /> 复习课</span><span><i className="dot break" /> 暂停周</span></div>
-      <div className="schedule-list">{timeline.map((entry) => entry.type === "break" ? <article className="schedule-break" key={`break-${entry.breakItem.id}`}><div className="timeline-node"><CloudSun size={17} /></div><div><strong>{entry.breakItem.title}</strong><span>{entry.breakItem.date} · 本周不考勤，后续课表已顺延；已有考勤随原课次保留</span></div></article> : <article className={`schedule-row ${entry.lesson.status ?? (entry.lesson.started ? "finished" : "future")}`} key={entry.lesson.id}><div className="timeline-node">{entry.lesson.lessonNumber}</div><div className="schedule-main"><div><strong>{entry.lesson.title}</strong><span className={`lesson-type ${entry.lesson.lessonType}`}>{entry.lesson.lessonType === "review" ? "复习课" : "普通课"}</span></div><small>第 {entry.lesson.lessonNumber} 个课次 · {entry.lesson.cadenceMode === "same_week" ? "同周完成" : "平行两周"}</small></div><div className="lesson-dates"><span><small>导图/提纲</small>{entry.lesson.lessonType === "review" ? "不需要" : entry.lesson.outlineDueDate}</span><span><small>组修</small>{entry.lesson.groupStudyDueDate}</span><span><small>班修</small>{entry.lesson.classStudyDueDate}</span></div><div className="row-actions"><button className="icon-button" aria-label={entry.lesson.scheduleEditable ? `编辑第 ${entry.lesson.lessonNumber} 个课次` : `第 ${entry.lesson.lessonNumber} 个课次已过截止日且有考勤，不可编辑`} onClick={() => setEditing(entry.lesson)} disabled={!entry.lesson.scheduleEditable} title={!entry.lesson.scheduleEditable ? "已有考勤且已过整课截止日，课表已锁定" : entry.lesson.scheduleLocked ? "底层已锁定；管理员可编辑课名或日期" : entry.lesson.hasRecordedAttendance ? "编辑课名或日期（已有考勤会保留）" : "编辑现有课次"}><Pencil size={16} /></button><button className="icon-button danger" aria-label={entry.lesson.scheduleEditable ? `删除第 ${entry.lesson.lessonNumber} 个课次` : `第 ${entry.lesson.lessonNumber} 个课次已过截止日且有考勤，不可删除`} onClick={() => void removeLesson(entry.lesson)} disabled={!entry.lesson.scheduleEditable} title={!entry.lesson.scheduleEditable ? "已有考勤且已过整课截止日，课表已锁定" : entry.lesson.scheduleLocked ? "底层已锁定；管理员可删除，删除会清空本课考勤" : entry.lesson.hasRecordedAttendance ? "删除课次并清空本课考勤" : "删除课次"}><Trash2 size={16} /></button></div></article>)}</div>
+      <div className="schedule-list">{timeline.map((entry) => entry.type === "break" ? <article className="schedule-break" key={`break-${entry.breakItem.id}`}><div className="timeline-node"><CloudSun size={17} /></div><div className="schedule-break-main"><strong>{entry.breakItem.title}</strong><span>{entry.breakItem.date}{entry.breakItem.weeks > 1 ? `起 · ${entry.breakItem.weeks} 周` : ""} · 本周不考勤，后续课表已顺延；已有考勤随原课次保留</span></div><div className="row-actions"><button className="icon-button" aria-label={`修改${entry.breakItem.title ?? "暂停周"}`} onClick={() => setEditingBreak(entry.breakItem)} title="修改暂停日期、周数或说明"><Pencil size={16} /></button><button className="icon-button danger" aria-label={`删除${entry.breakItem.title ?? "暂停周"}`} onClick={() => void removeBreak(entry.breakItem)} title="删除暂停周并撤销对应顺延"><Trash2 size={16} /></button></div></article> : <article className={`schedule-row ${entry.lesson.status ?? (entry.lesson.started ? "finished" : "future")}`} key={entry.lesson.id}><div className="timeline-node">{entry.lesson.lessonNumber}</div><div className="schedule-main"><div><strong>{entry.lesson.title}</strong><span className={`lesson-type ${entry.lesson.lessonType}`}>{entry.lesson.lessonType === "review" ? "复习课" : "普通课"}</span></div><small>第 {entry.lesson.lessonNumber} 个课次 · {entry.lesson.cadenceMode === "same_week" ? "同周完成" : "平行两周"}</small></div><div className="lesson-dates"><span><small>导图/提纲</small>{entry.lesson.lessonType === "review" ? "不需要" : entry.lesson.outlineDueDate}</span><span><small>组修</small>{entry.lesson.groupStudyDueDate}</span><span><small>班修</small>{entry.lesson.classStudyDueDate}</span></div><div className="row-actions"><button className="icon-button" aria-label={entry.lesson.scheduleEditable ? `编辑第 ${entry.lesson.lessonNumber} 个课次` : `第 ${entry.lesson.lessonNumber} 个课次已过截止日且有考勤，不可编辑`} onClick={() => setEditing(entry.lesson)} disabled={!entry.lesson.scheduleEditable} title={!entry.lesson.scheduleEditable ? "已有考勤且已过整课截止日，课表已锁定" : entry.lesson.scheduleLocked ? "底层已锁定；管理员可编辑课名或日期" : entry.lesson.hasRecordedAttendance ? "编辑课名或日期（已有考勤会保留）" : "编辑现有课次"}><Pencil size={16} /></button><button className="icon-button danger" aria-label={entry.lesson.scheduleEditable ? `删除第 ${entry.lesson.lessonNumber} 个课次` : `第 ${entry.lesson.lessonNumber} 个课次已过截止日且有考勤，不可删除`} onClick={() => void removeLesson(entry.lesson)} disabled={!entry.lesson.scheduleEditable} title={!entry.lesson.scheduleEditable ? "已有考勤且已过整课截止日，课表已锁定" : entry.lesson.scheduleLocked ? "底层已锁定；管理员可删除，删除会清空本课考勤" : entry.lesson.hasRecordedAttendance ? "删除课次并清空本课考勤" : "删除课次"}><Trash2 size={16} /></button></div></article>)}</div>
     </section>}
     {showGenerate && <GenerateSchedule classId={currentClass.id} defaultMode={currentClass.cadenceMode ?? "same_week"} hasLessons={lessons.length > 0} canSync={isAdmin} defaultSeriesKey={currentClass.courseSeriesKey} defaultRound={currentClass.courseRound} defaultStartPosition={currentClass.courseStartPosition} sourceProgress={currentClass.sourceProgress} onClose={() => setShowGenerate(false)} onSaved={reloadScheduleAndClass} />}
     {showRebuild && <RebuildFutureSchedule classId={currentClass.id} lessons={lessons} currentClass={currentClass} canSync={isAdmin} onClose={() => setShowRebuild(false)} onSaved={reloadScheduleAndClass} />}
     {showInsert && <InsertLesson classId={currentClass.id} lessons={lessons} seriesKey={currentClass.courseSeriesKey} onClose={() => setShowInsert(false)} onSaved={reloadScheduleAndClass} />}
-    {showBreak && <AddBreak classId={currentClass.id} onClose={() => setShowBreak(false)} onSaved={load} />}
+    {showBreak && <AddBreak classId={currentClass.id} onClose={() => setShowBreak(false)} onSaved={reloadScheduleAndClass} />}
+    {editingBreak && <EditBreak classId={currentClass.id} breakItem={editingBreak} isAdmin={isAdmin} onClose={() => setEditingBreak(null)} onSaved={reloadScheduleAndClass} />}
     {editing && <LessonEditor classId={currentClass.id} lesson={editing} onClose={() => setEditing(null)} onSaved={load} />}
   </main>;
 }
@@ -1942,6 +2013,8 @@ function AttendancePage({ currentClass, user }: { currentClass: ClassSummary; us
       setBaselineRows(normalizedRows);
       setPayload({
         attendanceSchemaVersion,
+        previewOnly: Boolean(data.previewOnly),
+        attendanceOpensOn: data.attendanceOpensOn == null ? undefined : String(data.attendanceOpensOn),
         lesson,
         rows: normalizedRows,
         canEdit: data.canEdit == null ? true : Boolean(data.canEdit),
@@ -2029,9 +2102,16 @@ function AttendancePage({ currentClass, user }: { currentClass: ClassSummary; us
     {loading ? <Loading text="正在准备本课名单..." /> : !payload ? <EmptyState icon={<ClipboardCheck size={28} />} title="还没有可登记的课次" detail="请先生成课表，然后回到这里登记考勤。" /> : <>
       <section className="lesson-summary-bar">
         <div><span className="soft-badge blue">第 {payload.lesson.lessonNumber} 课</span><div><h2>{payload.lesson.title}</h2><p>{payload.lesson.lessonType === "review" ? "复习课 · 导图/提纲自动标记为不需要" : "普通课"} · 班修截止 {payload.lesson.classStudyDueDate}</p></div></div>
-        <div className="pending-pills"><span>导图待填 <b>{pendingCounts.outline}</b></span><span>组修待填 <b>{pendingCounts.group}</b></span><span>班修待填 <b>{pendingCounts.classStudy}</b></span></div>
+        <div className="pending-pills">{payload.previewOnly
+          ? <><span>预计名单 <b>{rows.length}</b> 人</span><span>开放日期 <b>{payload.attendanceOpensOn}</b></span></>
+          : <><span>导图待填 <b>{pendingCounts.outline}</b></span><span>组修待填 <b>{pendingCounts.group}</b></span><span>班修待填 <b>{pendingCounts.classStudy}</b></span></>}
+        </div>
       </section>
-      {!editable && <div className="notice info"><AlertTriangle size={17} /><span>{payload.lockedForMonitor ? "本课已超过班修截止日 14 天，班长和考勤员的登记已锁定；请联系辅导员补改。" : "您没有编辑本课考勤的权限。"}</span></div>}
+      {!editable && <div className="notice info"><AlertTriangle size={17} /><span>{payload.previewOnly
+        ? `本课尚未开始，将于 ${payload.attendanceOpensOn} 开放考勤。当前显示预计名单，正式名单会在开始时生成。`
+        : payload.lockedForMonitor
+          ? "本课已超过班修截止日 14 天，班长和考勤员的登记已锁定；请联系辅导员补改。"
+          : "您没有编辑本课考勤的权限。"}</span></div>}
       <section className="panel batch-panel">
         <div className="panel-head"><div><h2>批量填写</h2><p>作用范围：{groupFilter === "all" ? `全班 ${visibleRows.length} 人` : `${groups.find((g) => String(g.id) === groupFilter)?.name} ${visibleRows.length} 人`}</p></div><span className="step-chip">第 1 步</span></div>
         <div className="batch-grid">
@@ -2044,8 +2124,8 @@ function AttendancePage({ currentClass, user }: { currentClass: ClassSummary; us
       </section>
       <section className="panel attendance-panel">
         <div className="panel-head"><div><h2>逐位核对</h2><p>点击已选状态可清空；未填写不会进入完成率分母。</p></div><span className="step-chip">第 2 步</span></div>
-        {visibleRows.length === 0 ? <EmptyState title="该范围没有学员" detail="请选择其他小组。" /> : <>
-          <div className="table-wrap desktop-table attendance-table"><table><thead><tr><th>学员</th><th>导图 / 提纲</th><th>组修</th><th>班修</th><th>最后修改</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.studentId}><td><div className="person-cell"><div className="mini-avatar">{row.name.slice(0, 1)}</div><span><strong>{row.name}</strong><small>{row.dharmaName || row.groupName}</small></span></div></td><td>{payload.lesson.lessonType === "review" ? <span className="not-needed">不需要</span> : <SegmentedSelect value={row.outline === "not_required" ? null : row.outline} options={OUTLINE_OPTIONS} onChange={(value) => updateRow(row.studentId, "outline", value)} disabled={!metricEditable("outline")} ariaLabel={`${row.name}的导图提纲`} />}</td><td><SegmentedSelect value={row.groupStudy} options={GROUP_OPTIONS} onChange={(value) => updateRow(row.studentId, "groupStudy", value)} disabled={!metricEditable("group_study")} ariaLabel={`${row.name}的组修`} /></td><td><SegmentedSelect value={row.classStudy} options={CLASS_OPTIONS} onChange={(value) => updateRow(row.studentId, "classStudy", value)} disabled={!metricEditable("class_study")} ariaLabel={`${row.name}的班修`} /></td><td><small>{row.updatedBy ? <>{row.updatedBy}<br />{dateOnly(row.updatedAt)}</> : "尚未保存"}</small></td></tr>)}</tbody></table></div>
+        {visibleRows.length === 0 ? <EmptyState title="该范围没有学员" detail={payload.previewOnly ? "预计名单暂无学员，请先维护学员名单。" : "请选择其他小组。"} /> : <>
+          <div className="table-wrap desktop-table attendance-table"><table><thead><tr><th>学员</th><th>导图 / 提纲</th><th>组修</th><th>班修</th><th>最后修改</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.studentId}><td><div className="person-cell"><div className="mini-avatar">{row.name.slice(0, 1)}</div><span><strong>{row.name}</strong><small>{row.dharmaName || row.groupName}</small></span></div></td><td>{payload.lesson.lessonType === "review" ? <span className="not-needed">不需要</span> : <SegmentedSelect value={row.outline === "not_required" ? null : row.outline} options={OUTLINE_OPTIONS} onChange={(value) => updateRow(row.studentId, "outline", value)} disabled={!metricEditable("outline")} ariaLabel={`${row.name}的导图提纲`} />}</td><td><SegmentedSelect value={row.groupStudy} options={GROUP_OPTIONS} onChange={(value) => updateRow(row.studentId, "groupStudy", value)} disabled={!metricEditable("group_study")} ariaLabel={`${row.name}的组修`} /></td><td><SegmentedSelect value={row.classStudy} options={CLASS_OPTIONS} onChange={(value) => updateRow(row.studentId, "classStudy", value)} disabled={!metricEditable("class_study")} ariaLabel={`${row.name}的班修`} /></td><td><small>{row.updatedBy ? <>{row.updatedBy}<br />{dateOnly(row.updatedAt)}</> : payload.previewOnly ? "尚未开始" : "尚未保存"}</small></td></tr>)}</tbody></table></div>
           <div className="mobile-card-list attendance-cards">{visibleRows.map((row) => <article className="attendance-card" key={row.studentId}><div className="person-cell"><div className="mini-avatar large">{row.name.slice(0, 1)}</div><span><strong>{row.name}</strong><small>{row.dharmaName || row.groupName}</small></span></div><div className="mobile-metric"><label>导图 / 提纲</label>{payload.lesson.lessonType === "review" ? <span className="not-needed">复习课 · 不需要</span> : <SegmentedSelect value={row.outline === "not_required" ? null : row.outline} options={OUTLINE_OPTIONS} onChange={(value) => updateRow(row.studentId, "outline", value)} disabled={!metricEditable("outline")} ariaLabel={`${row.name}的导图提纲`} />}</div><div className="mobile-metric"><label>组修</label><SegmentedSelect value={row.groupStudy} options={GROUP_OPTIONS} onChange={(value) => updateRow(row.studentId, "groupStudy", value)} disabled={!metricEditable("group_study")} ariaLabel={`${row.name}的组修`} /></div><div className="mobile-metric"><label>班修</label><SegmentedSelect value={row.classStudy} options={CLASS_OPTIONS} onChange={(value) => updateRow(row.studentId, "classStudy", value)} disabled={!metricEditable("class_study")} ariaLabel={`${row.name}的班修`} /></div></article>)}</div>
         </>}
       </section>

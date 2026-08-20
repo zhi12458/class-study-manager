@@ -5,6 +5,7 @@ import {
   insertBreak,
   isMonitorLocked,
   monitorLockDate,
+  removeBreak,
   shiftScheduleFrom,
 } from "../src/server/services/schedule.js";
 
@@ -123,6 +124,29 @@ describe("schedule changes", () => {
       classStudyDueDate: "2026-02-04",
     });
     expect(original[0].classStudyDueDate).toBe("2026-01-14");
+  });
+
+  it("撤销暂停周时精确恢复原课表", () => {
+    const original = generateSchedule({ firstFinalDueDate: "2026-01-14", count: 3 });
+    const shifted = insertBreak(original, "2026-01-08", "暂停一周").lessons;
+
+    expect(removeBreak(shifted, "2026-01-08")).toEqual(original);
+    expect(shifted).not.toEqual(original);
+  });
+
+  it("多个暂停周可以按创建顺序撤销并重新应用", () => {
+    const original = generateSchedule({ firstFinalDueDate: "2026-01-10", count: 3 });
+    const first = insertBreak(original, "2026-01-04", "第一次暂停").lessons;
+    const both = insertBreak(first, "2026-01-11", "第二次暂停").lessons;
+    const withoutSecond = removeBreak(both, "2026-01-11");
+    const base = removeBreak(withoutSecond, "2026-01-04");
+    const onlySecond = insertBreak(base, "2026-01-11", "第二次暂停").lessons;
+
+    expect(withoutSecond).toEqual(first);
+    expect(base).toEqual(original);
+    expect(onlySecond.map((lesson) => lesson.classStudyDueDate)).toEqual([
+      "2026-01-10", "2026-01-24", "2026-01-31"
+    ]);
   });
 });
 

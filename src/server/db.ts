@@ -45,6 +45,7 @@ function runMigrations(db: DatabaseSync): void {
   if (!applied.has(12)) migrationTwelve(db);
   if (!applied.has(13)) migrationThirteen(db);
   if (!applied.has(14)) migrationFourteen(db);
+  if (!applied.has(15)) migrationFifteen(db);
 }
 
 function migrationOne(db: DatabaseSync): void {
@@ -671,6 +672,37 @@ function migrationFourteen(db: DatabaseSync): void {
       }));
     }
     db.prepare("insert into schema_migrations (version) values (14)").run();
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function migrationFifteen(db: DatabaseSync): void {
+  db.exec("begin immediate");
+  try {
+    db.exec(`
+      alter table schedule_breaks
+        add column applied_to_schedule integer not null default 1
+        check(applied_to_schedule in (0, 1));
+
+      update schedule_breaks
+         set applied_to_schedule = 0
+       where not exists (
+         select 1 from lessons where lessons.class_id = schedule_breaks.class_id
+       )
+          or not exists (
+         select 1
+           from lessons
+          where lessons.class_id = schedule_breaks.class_id
+            and (lessons.outline_due_date >= schedule_breaks.start_date
+              or lessons.group_study_due_date >= schedule_breaks.start_date
+              or lessons.class_study_due_date >= schedule_breaks.start_date)
+       );
+
+      insert into schema_migrations (version) values (15);
+    `);
     db.exec("commit");
   } catch (error) {
     db.exec("rollback");

@@ -59,6 +59,191 @@ async function createScheduledClass(firstDueDate = "2099-01-10", count = 3) {
 }
 
 describe("未来课表重建与课次插入", () => {
+  it("删除未作用于重建课表的历史暂停周不会提前新课表", async () => {
+    const { db, server, admin, classId } = await createScheduledClass("2099-01-10", 2);
+    try {
+      expect((await admin.post(`/classes/${classId}/breaks`, {
+        date: "2099-01-04",
+        reason: "旧课表暂停"
+      })).status).toBe(200);
+      const savedBreak = (await admin.get<{ breaks: Array<{ id: number }> }>(
+        `/classes/${classId}/breaks`
+      )).body.breaks[0];
+
+      const rebuilt = await admin.post(`/classes/${classId}/schedule/rebuild-future`, {
+        firstDueDate: "2099-03-14",
+        count: 2,
+        cadenceMode: "same_week",
+        seriesKey: "wisdom_life",
+        startPosition: 3,
+        round: 1
+      });
+      expect(rebuilt.status).toBe(200);
+      expect((db.prepare(
+        "select applied_to_schedule as applied from schedule_breaks where id = ?"
+      ).get(savedBreak.id) as { applied: number }).applied).toBe(0);
+
+      const beforeDelete = (await admin.get<{ lessons: Array<{ classStudyDueDate: string }> }>(
+        `/classes/${classId}/lessons`
+      )).body.lessons.map((lesson) => lesson.classStudyDueDate);
+      expect(beforeDelete).toEqual(["2099-03-14", "2099-03-21"]);
+
+      const deleted = await admin.delete<{ affectedLessonCount: number }>(
+        `/classes/${classId}/breaks/${savedBreak.id}`
+      );
+      expect(deleted.status).toBe(200);
+      expect(deleted.body.affectedLessonCount).toBe(0);
+      const afterDelete = (await admin.get<{ lessons: Array<{ classStudyDueDate: string }> }>(
+        `/classes/${classId}/lessons`
+      )).body.lessons.map((lesson) => lesson.classStudyDueDate);
+      expect(afterDelete).toEqual(beforeDelete);
+    } finally {
+      await server.close();
+      db.close();
+    }
+  });
+
+  it("历史暂停移入新课表范围后才生效，删除后恢复原日期", async () => {
+    const { db, server, admin, classId } = await createScheduledClass("2099-01-10", 2);
+    try {
+      expect((await admin.post(`/classes/${classId}/breaks`, {
+        date: "2099-01-04",
+        reason: "待调整暂停"
+      })).status).toBe(200);
+      const savedBreak = (await admin.get<{ breaks: Array<{ id: number }> }>(
+        `/classes/${classId}/breaks`
+      )).body.breaks[0];
+      expect((await admin.post(`/classes/${classId}/schedule/rebuild-future`, {
+        firstDueDate: "2099-03-14",
+        count: 2,
+        cadenceMode: "same_week",
+        seriesKey: "wisdom_life",
+        startPosition: 3,
+        round: 1
+      })).status).toBe(200);
+
+      const edited = await admin.patch<{ affectedLessonCount: number }>(
+        `/classes/${classId}/breaks/${savedBreak.id}`,
+        { date: "2099-03-08", weeks: 1, reason: "新课表暂停" }
+      );
+      expect(edited.status).toBe(200);
+      expect(edited.body.affectedLessonCount).toBe(2);
+      expect((db.prepare(
+        "select applied_to_schedule as applied from schedule_breaks where id = ?"
+      ).get(savedBreak.id) as { applied: number }).applied).toBe(1);
+      expect((await admin.get<{ lessons: Array<{ classStudyDueDate: string }> }>(
+        `/classes/${classId}/lessons`
+      )).body.lessons.map((lesson) => lesson.classStudyDueDate)).toEqual(["2099-03-21", "2099-03-28"]);
+
+      expect((await admin.delete(`/classes/${classId}/breaks/${savedBreak.id}`)).status).toBe(200);
+      expect((await admin.get<{ lessons: Array<{ classStudyDueDate: string }> }>(
+        `/classes/${classId}/lessons`
+      )).body.lessons.map((lesson) => lesson.classStudyDueDate)).toEqual(["2099-03-14", "2099-03-21"]);
+    } finally {
+      await server.close();
+      db.close();
+    }
+  });
+
+  it("支持修改和删除暂停周，并按创建顺序重算多个暂停对课表的影响", async () => {
+    const { db, server, admin, classId } = await createScheduledClass("2099-01-10", 3);
+    try {
+      expect((await admin.post(`/classes/${classId}/breaks`, { date: "2099-01-04", reason: "第一次暂停" })).status).toBe(200);
+      expect((await admin.post(`/classes/${classId}/breaks`, { date: "2099-01-11", reason: "第二次暂停" })).status).toBe(200);
+      const before = (await admin.get<{
+        lessons: Array<{ classStudyDueDate: string }>;
+        breaks: Array<{ id: number; startDate: string }>;
+      }>(`/classes/${classId}/lessons`)).body;
+      expect(before.lessons.map((lesson) => lesson.classStudyDueDate)).toEqual(["2099-01-24", "2099-01-31", "2099-02-07"]);
+
+      const firstBreak = before.breaks.find((item) => item.startDate === "2099-01-04")!;
+      expect((await admin.delete(`/classes/${classId}/breaks/${firstBreak.id}`)).status).toBe(200);
+      const afterDelete = (await admin.get<{
+        lessons: Array<{ classStudyDueDate: string }>;
+        breaks: Array<{ id: number; startDate: string }>;
+      }>(`/classes/${classId}/lessons`)).body;
+      expect(afterDelete.lessons.map((lesson) => lesson.classStudyDueDate)).toEqual(["2099-01-10", "2099-01-24", "2099-01-31"]);
+
+      const remainingBreak = afterDelete.breaks[0];
+      const edited = await admin.patch<{ affectedLessonCount: number }>(`/classes/${classId}/breaks/${remainingBreak.id}`, {
+        date: "2099-01-18",
+        weeks: 1,
+        reason: "调整后的暂停周"
+      });
+      expect(edited.status).toBe(200);
+      expect(edited.body.affectedLessonCount).toBe(1);
+      const afterEdit = (await admin.get<{
+        lessons: Array<{ classStudyDueDate: string }>;
+        breaks: Array<{ startDate: string; reason: string }>;
+      }>(`/classes/${classId}/lessons`)).body;
+      expect(afterEdit.lessons.map((lesson) => lesson.classStudyDueDate)).toEqual(["2099-01-10", "2099-01-17", "2099-01-31"]);
+      expect(afterEdit.breaks).toEqual([
+        expect.objectContaining({ startDate: "2099-01-18", reason: "调整后的暂停周" })
+      ]);
+    } finally {
+      await server.close();
+      db.close();
+    }
+  });
+
+  it("本周已开始但无考勤的暂停周仍允许辅导员修改和删除", async () => {
+    const dueDate = addDays(shanghaiToday(), 2);
+    const breakDate = addDays(shanghaiToday(), -3);
+    const { db, server, counselor, classId } = await createScheduledClass(dueDate, 2);
+    try {
+      expect((await counselor.post(`/classes/${classId}/breaks`, { date: breakDate, reason: "本周暂停" })).status).toBe(200);
+      const savedBreak = (await counselor.get<{ breaks: Array<{ id: number }> }>(`/classes/${classId}/breaks`)).body.breaks[0];
+      expect((await counselor.patch(`/classes/${classId}/breaks/${savedBreak.id}`, {
+        date: breakDate,
+        weeks: 1,
+        reason: "本周暂停（已修改）"
+      })).status).toBe(200);
+      expect((await counselor.delete(`/classes/${classId}/breaks/${savedBreak.id}`)).status).toBe(200);
+      expect((await counselor.get<{ breaks: unknown[] }>(`/classes/${classId}/breaks`)).body.breaks).toEqual([]);
+    } finally {
+      await server.close();
+      db.close();
+    }
+  });
+
+  it("已过截止日且有考勤的受影响课次仍受保护，管理员二次确认后可调整且保留考勤", async () => {
+    const originalDueDate = addDays(shanghaiToday(), -21);
+    const breakDate = addDays(originalDueDate, -6);
+    const { db, server, admin, counselor, classId } = await createScheduledClass(originalDueDate, 1);
+    try {
+      expect((await counselor.post(`/classes/${classId}/breaks`, { date: breakDate, reason: "历史暂停" })).status).toBe(200);
+      const lesson = (await admin.get<{ lessons: Array<{ id: number }> }>(`/classes/${classId}/lessons`)).body.lessons[0];
+      const groupId = (db.prepare("select id from groups where class_id = ? limit 1").get(classId) as { id: number }).id;
+      const personId = Number(db.prepare("insert into persons (name) values ('暂停锁定学员')").run().lastInsertRowid);
+      const enrollmentId = Number(db.prepare(
+        "insert into enrollments (class_id, person_id, active_from_sequence) values (?, ?, 1)"
+      ).run(classId, personId).lastInsertRowid);
+      const rosterId = Number(db.prepare(
+        `insert into lesson_roster (lesson_id, enrollment_id, student_name, group_id, group_name)
+         values (?, ?, '暂停锁定学员', ?, '第一组')`
+      ).run(lesson.id, enrollmentId, groupId).lastInsertRowid);
+      db.prepare("update lessons set roster_frozen_at = current_timestamp where id = ?").run(lesson.id);
+      const adminId = (db.prepare("select id from users where username = 'admin'").get() as { id: number }).id;
+      db.prepare(
+        `insert into attendance_entries (lesson_id, lesson_roster_id, metric, status, modified_by)
+         values (?, ?, 'outline', 'yes', ?)`
+      ).run(lesson.id, rosterId, adminId);
+      const savedBreak = (await admin.get<{ breaks: Array<{ id: number }> }>(`/classes/${classId}/breaks`)).body.breaks[0];
+
+      const counselorDenied = await counselor.delete<{ error: string }>(`/classes/${classId}/breaks/${savedBreak.id}`);
+      expect(counselorDenied.status).toBe(400);
+      expect(counselorDenied.body.error).toContain("锁定课次");
+      const adminNeedsConfirmation = await admin.delete<{ error: string }>(`/classes/${classId}/breaks/${savedBreak.id}`);
+      expect(adminNeedsConfirmation.status).toBe(409);
+      expect(adminNeedsConfirmation.body.error).toContain("管理员确认后");
+      expect((await admin.delete(`/classes/${classId}/breaks/${savedBreak.id}`, { confirmLockedImpact: true })).status).toBe(200);
+      expect((db.prepare("select count(*) as count from attendance_entries where lesson_id = ?").get(lesson.id) as { count: number }).count).toBe(1);
+    } finally {
+      await server.close();
+      db.close();
+    }
+  });
+
   it("允许修改已经进入本周但尚无考勤记录的课次", async () => {
     const originalDueDate = addDays(shanghaiToday(), 2);
     const { db, server, admin, classId } = await createScheduledClass(originalDueDate, 2);

@@ -31,15 +31,22 @@ export function getNextEffectiveSequence(db: DatabaseSync, classId: number, toda
   return (lessons.at(-1)?.sequence ?? 0) + 1;
 }
 
-export function freezeLessonRoster(db: DatabaseSync, lessonId: number): void {
-  const lesson = db.prepare(
-    "select id, class_id as classId, sequence, lesson_type as lessonType, roster_frozen_at as frozenAt from lessons where id = ?"
-  ).get(lessonId) as { id: number; classId: number; sequence: number; lessonType: string; frozenAt: string | null } | undefined;
-  if (!lesson || lesson.frozenAt) return;
+export interface LessonRosterPreviewRow {
+  enrollmentId: number;
+  name: string;
+  dharmaName: string | null;
+  groupId: number;
+  groupName: string;
+}
 
-  const rows = db.prepare(
-    `select e.id as enrollmentId, coalesce(nullif(trim(p.name), ''), p.dharma_name) as name, p.dharma_name as dharmaName,
-            g.id as groupId, g.name as groupName
+export function listLessonRosterPreview(
+  db: DatabaseSync,
+  classId: number,
+  sequence: number,
+): LessonRosterPreviewRow[] {
+  return db.prepare(
+    `select e.id as enrollmentId, coalesce(nullif(trim(p.name), ''), p.dharma_name) as name,
+            p.dharma_name as dharmaName, g.id as groupId, g.name as groupName
        from enrollments e
        join persons p on p.id = e.person_id
        join group_assignments ga on ga.enrollment_id = e.id
@@ -52,10 +59,17 @@ export function freezeLessonRoster(db: DatabaseSync, lessonId: number): void {
       where e.class_id = ?
         and e.active_from_sequence <= ?
         and es.status = 'normal'
-      order by g.sort_order, p.name`
-  ).all(lesson.sequence, lesson.sequence, lesson.sequence, lesson.sequence, lesson.classId, lesson.sequence) as Array<{
-    enrollmentId: number; name: string; dharmaName: string | null; groupId: number; groupName: string;
-  }>;
+      order by g.sort_order, p.name`,
+  ).all(sequence, sequence, sequence, sequence, classId, sequence) as unknown as LessonRosterPreviewRow[];
+}
+
+export function freezeLessonRoster(db: DatabaseSync, lessonId: number): void {
+  const lesson = db.prepare(
+    "select id, class_id as classId, sequence, lesson_type as lessonType, roster_frozen_at as frozenAt from lessons where id = ?"
+  ).get(lessonId) as { id: number; classId: number; sequence: number; lessonType: string; frozenAt: string | null } | undefined;
+  if (!lesson || lesson.frozenAt) return;
+
+  const rows = listLessonRosterPreview(db, lesson.classId, lesson.sequence);
 
   const insertRoster = db.prepare(
     `insert or ignore into lesson_roster

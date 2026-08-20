@@ -192,6 +192,24 @@ export function insertBreak(
   };
 }
 
+/** Reverse one previously applied seven-day break without mutating input. */
+export function removeBreak(
+  lessons: readonly LessonScheduleItem[],
+  startsOn: string,
+): LessonScheduleItem[] {
+  parseDateOnly(startsOn, "暂停周开始日");
+  const firstShiftedDate = addCalendarDays(startsOn, 7);
+  const unshiftIfNeeded = (dueDate: string): string =>
+    compareDateOnly(dueDate, firstShiftedDate) >= 0 ? addCalendarDays(dueDate, -7) : dueDate;
+
+  return lessons.map((lesson) => ({
+    ...lesson,
+    outlineDueDate: unshiftIfNeeded(lesson.outlineDueDate),
+    groupStudyDueDate: unshiftIfNeeded(lesson.groupStudyDueDate),
+    classStudyDueDate: unshiftIfNeeded(lesson.classStudyDueDate),
+  }));
+}
+
 function todayInShanghai(): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
