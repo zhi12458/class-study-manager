@@ -2101,7 +2101,7 @@ function AttendancePage({ currentClass, user }: { currentClass: ClassSummary; us
     <Notice notice={notice} onClose={() => setNotice(null)} />
     {loading ? <Loading text="正在准备本课名单..." /> : !payload ? <EmptyState icon={<ClipboardCheck size={28} />} title="还没有可登记的课次" detail="请先生成课表，然后回到这里登记考勤。" /> : <>
       <section className="lesson-summary-bar">
-        <div><span className="soft-badge blue">第 {payload.lesson.lessonNumber} 课</span><div><h2>{payload.lesson.title}</h2><p>{payload.lesson.lessonType === "review" ? "复习课 · 导图/提纲自动标记为不需要" : "普通课"} · 班修截止 {payload.lesson.classStudyDueDate}</p></div></div>
+        <div><div><h2>{payload.lesson.title}</h2><p>{payload.lesson.lessonType === "review" ? "复习课 · 导图/提纲自动标记为不需要" : "普通课"} · 班修截止 {payload.lesson.classStudyDueDate}</p></div></div>
         <div className="pending-pills">{payload.previewOnly
           ? <><span>预计名单 <b>{rows.length}</b> 人</span><span>开放日期 <b>{payload.attendanceOpensOn}</b></span></>
           : <><span>导图待填 <b>{pendingCounts.outline}</b></span><span>组修待填 <b>{pendingCounts.group}</b></span><span>班修待填 <b>{pendingCounts.classStudy}</b></span></>}
