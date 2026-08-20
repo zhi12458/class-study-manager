@@ -2097,7 +2097,7 @@ function AttendancePage({ currentClass, user }: { currentClass: ClassSummary; us
   }), { outline: 0, group: 0, classStudy: 0 });
 
   return <main className="page attendance-page">
-    <PageHeader eyebrow="ATTENDANCE" title="考勤登记" description="先批量填写全班或当前小组，再逐位调整例外情况。" actions={lessons.length ? <label className="lesson-picker"><span>选择课次</span><select value={lessonId ?? ""} onChange={(e) => changeLesson(Number(e.target.value))}>{lessons.map((lesson) => <option key={lesson.id} value={lesson.id}>第 {lesson.lessonNumber} 课 · {lesson.title} · {lesson.classStudyDueDate}</option>)}</select></label> : undefined} />
+    <PageHeader eyebrow="ATTENDANCE" title="考勤登记" description="先批量填写全班或当前小组，再逐位调整例外情况。" actions={lessons.length ? <label className="lesson-picker"><span>选择课次</span><select value={lessonId ?? ""} onChange={(e) => changeLesson(Number(e.target.value))}>{lessons.map((lesson) => <option key={lesson.id} value={lesson.id}>{lesson.title} · {lesson.classStudyDueDate}</option>)}</select></label> : undefined} />
     <Notice notice={notice} onClose={() => setNotice(null)} />
     {loading ? <Loading text="正在准备本课名单..." /> : !payload ? <EmptyState icon={<ClipboardCheck size={28} />} title="还没有可登记的课次" detail="请先生成课表，然后回到这里登记考勤。" /> : <>
       <section className="lesson-summary-bar">

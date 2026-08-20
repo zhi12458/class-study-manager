@@ -75,6 +75,8 @@ test("弹窗限制键盘焦点并在关闭后回到触发按钮", async ({ page 
 
 test("主要管理页面和考勤保存流程可操作", async ({ page }, testInfo) => {
   await navigate(page, "考勤登记");
+  const lessonOptionLabels = await page.getByRole("combobox", { name: "选择课次" }).locator("option").allTextContents();
+  expect(lessonOptionLabels.every((label) => !/^第\s*\d+\s*课\s*·/.test(label))).toBe(true);
   await expect(page.getByRole("option", { name: "补课" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "补课" })).toHaveCount(0);
   for (const metric of ["组修", "班修"]) {
