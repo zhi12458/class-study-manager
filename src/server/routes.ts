@@ -1309,7 +1309,22 @@ export function createApiRouter(db: DatabaseSync) {
   });
 
   router.post("/classes/:classId/lessons/append", requireAuth, requireClassScheduleAccess(db), (req, res) => {
-    const classId = numberParam(req.params.classId); const generatedCount = appendLessons(db, classId, Number(req.body.count ?? 24));
+    const classId = numberParam(req.params.classId);
+    const selectedCourse = req.body.course;
+    let course: { seriesKey: string; startPosition: number; round: number } | undefined;
+    if (selectedCourse !== undefined) {
+      if (!selectedCourse || typeof selectedCourse !== "object" || Array.isArray(selectedCourse)) {
+        return void res.status(400).json({ error: "追加课程选择无效" });
+      }
+      const seriesKey = String(selectedCourse.seriesKey ?? "").trim();
+      const startPosition = Number(selectedCourse.startPosition);
+      const round = Number(selectedCourse.round ?? 1);
+      if (!/^[a-z0-9_]+$/.test(seriesKey)) return void res.status(400).json({ error: "课程体系无效" });
+      if (!Number.isInteger(startPosition) || startPosition < 1) return void res.status(400).json({ error: "课程起点无效" });
+      if (!Number.isInteger(round) || round < 1 || round > 20) return void res.status(400).json({ error: "学习遍数无效" });
+      course = { seriesKey, startPosition, round };
+    }
+    const generatedCount = appendLessons(db, classId, Number(req.body.count ?? 24), course);
     res.json({ generatedCount });
   });
 

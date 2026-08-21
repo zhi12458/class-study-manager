@@ -455,7 +455,12 @@ export function createClass(db: DatabaseSync, input: {
   }
 }
 
-export function appendLessons(db: DatabaseSync, classId: number, count = 24): number {
+export function appendLessons(
+  db: DatabaseSync,
+  classId: number,
+  count = 24,
+  course?: { seriesKey: string; startPosition: number; round: number },
+): number {
   if (!Number.isInteger(count) || count < 1 || count > 100) throw new Error("追加课数必须为1至100");
   const cls = db.prepare(
     "select cadence_mode as cadenceMode, course_series_key as courseSeriesKey, course_start_position as courseStartPosition from classes where id = ?"
@@ -464,11 +469,12 @@ export function appendLessons(db: DatabaseSync, classId: number, count = 24): nu
   if (existing.length === 0) throw new Error("请先设置第一课截止日");
   const last = existing.at(-1)!;
   const nextDue = addDays(last.classStudyDueDate, cls.cadenceMode === "parallel_two_week" ? 14 : 7);
-  const nextCoursePosition = last.coursePosition == null
-    ? cls.courseStartPosition + existing.length
-    : last.coursePosition + 1;
-  const plan = cls.courseSeriesKey
-    ? catalogPlan(db, cls.courseSeriesKey, nextCoursePosition, count)
+  const lastCatalogPosition = [...existing].reverse().find((lesson) => lesson.coursePosition != null)?.coursePosition;
+  const nextCoursePosition = lastCatalogPosition == null ? cls.courseStartPosition : lastCatalogPosition + 1;
+  const seriesKey = course?.seriesKey ?? cls.courseSeriesKey;
+  const startPosition = course?.startPosition ?? nextCoursePosition;
+  const plan = seriesKey
+    ? catalogPlan(db, seriesKey, startPosition, count)
     : { ...coursePlanForRange(last.sequence + 1, count), positions: [] as number[] };
   const generated = generateSchedule({
     firstFinalDueDate: nextDue, count: plan.titles.length, cadenceMode: cls.cadenceMode,
@@ -477,6 +483,13 @@ export function appendLessons(db: DatabaseSync, classId: number, count = 24): nu
   const scheduled = applySavedBreaks(db, classId, generated);
   db.exec("begin immediate");
   try {
+    if (course) {
+      db.prepare(
+        `update classes
+            set course_series_key = ?, course_round = ?, course_start_position = ?, updated_at = current_timestamp
+          where id = ?`,
+      ).run(course.seriesKey, course.round, course.startPosition, classId);
+    }
     insertLessons(db, classId, scheduled.lessons, plan.positions);
     reconcileBreakApplicationState(db, classId, existing, scheduled.appliedBreakIds);
     db.exec("commit");

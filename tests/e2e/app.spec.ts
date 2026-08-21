@@ -110,6 +110,23 @@ test("主要管理页面和考勤保存流程可操作", async ({ page }, testIn
   const lockedLessonEdit = page.getByRole("button", { name: "编辑第 1 个课次" });
   await expect(lockedLessonEdit).toBeEnabled();
   await expect(lockedLessonEdit).toHaveAttribute("title", /管理员可编辑/);
+  const catalogPayload = {
+    series: [
+      { key: "wisdom_life", displayName: "智慧人生", items: [1, 2, 3, 4].map((position) => ({ position, title: `智慧人生第${position}课`, lessonType: "regular" })) },
+      { key: "next_course", displayName: "下一套课程", items: [{ position: 1, title: "下一套课程第1课", lessonType: "regular" }] }
+    ]
+  };
+  await page.route("**/api/course-catalog", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(catalogPayload) }));
+  await page.route("**/api/admin/course-catalog/sync", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ seriesCount: 2, itemCount: 5 }) }));
+  await page.getByRole("button", { name: "追加课次" }).click();
+  const appendDialog = page.getByRole("dialog", { name: "追加课次" });
+  await expect(appendDialog.getByLabel("追加哪套课程")).toBeVisible();
+  await expect(appendDialog.getByLabel("从哪一课开始")).toHaveValue("4");
+  await appendDialog.getByLabel("追加哪套课程").selectOption("next_course");
+  await appendDialog.getByRole("button", { name: "刷新目录" }).click();
+  await expect(appendDialog.getByLabel("追加哪套课程")).toHaveValue("next_course");
+  await expect(appendDialog.getByLabel("从哪一课开始")).toHaveValue("1");
+  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "重新生成可调整课表" }).click();
   const rebuildDialog = page.getByRole("dialog", { name: "重新生成可调整课表" });
   await expect(rebuildDialog).toBeVisible();
